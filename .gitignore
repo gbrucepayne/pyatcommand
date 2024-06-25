@@ -2,5 +2,7 @@
 .venv
 .env
 logs
-__pycache__/
+__pycache__
 *.py[cod]
+simdce
+simdte

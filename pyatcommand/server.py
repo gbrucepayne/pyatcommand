@@ -7,8 +7,8 @@ from typing import Callable
 
 from serial import Serial
 
-from .atconstants import AtErrorCode, AtParsing
-from .atutils import AtConfig
+from .constants import AtErrorCode, AtParsing
+from .utils import AtConfig
 
 _log = logging.getLogger(__name__)
 

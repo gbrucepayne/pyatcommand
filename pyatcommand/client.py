@@ -7,8 +7,8 @@ import time
 
 from serial import Serial, SerialException
 
-from .atconstants import AT_TIMEOUT, AT_URC_TIMEOUT, AtErrorCode, AtParsing
-from .atutils import AtConfig, dprint, printable_char, vlog
+from .constants import AT_TIMEOUT, AT_URC_TIMEOUT, AtErrorCode, AtParsing
+from .utils import AtConfig, dprint, printable_char, vlog
 from .crcxmodem import validate_crc
 
 VLOG_TAG = 'atclient'

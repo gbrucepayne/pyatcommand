@@ -6,7 +6,7 @@ for increasing robustness in electrically noisy environments or long cable runs.
 """
 import logging
 
-from .atutils import dprint, vlog
+from .utils import dprint, vlog
 
 POLYNOMIAL = 0x1021
 CRC_SEP = '*'
