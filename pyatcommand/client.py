@@ -307,8 +307,11 @@ class AtClient:
         if vlog(VLOG_TAG):
             _log.debug('Parsing complete (error code %d) - clearing command %s',
                        self._cmd_error, dprint(self._cmd_pending))
-            if self._res_ready:
-                _log.debug('Response: %s', dprint(self._rx_buffer))
+        if self._res_ready:
+            _log.debug('Response: %s', dprint(self._rx_buffer))
+        empty_res = [self.vres_ok, self.vres_err, self.res_ok, self.res_err]
+        if self._rx_buffer in empty_res:
+            self._rx_buffer = ''
         self._cmd_pending = ''
         self.ready.set()
         return self._cmd_error
@@ -456,7 +459,7 @@ class AtClient:
             clean: If False include all non-printable characters
         """
         if prefix:
-            self._rx_buffer.replace(prefix, '', 1)
+            self._rx_buffer = self._rx_buffer.replace(prefix, '', 1)
             if vlog(VLOG_TAG):
                 _log.debug('Removed prefix (%s): %s',
                             dprint(prefix), dprint(self._rx_buffer))
