@@ -297,7 +297,8 @@ class AtClient:
                 try:
                     self._cmd_error = (
                         int(self._rx_buffer.replace(self.cme_err, '').strip()))
-                    _log.debug('Found CME ERROR code - clearing response buffer')
+                    _log.debug('Found CME ERROR %d - clearing response buffer',
+                               self._cmd_error)
                 except Exception as exc:
                     _log.error(exc)
                 self._rx_buffer = ''
