@@ -102,7 +102,7 @@ class AtClient:
             self._serial.close()
             self._serial = None
     
-    def _read_serial_char(self, ignore_unprintable: bool = False) -> bool:
+    def _read_serial_char(self, ignore_unprintable: bool = True) -> bool:
         """Read the next valid ASCII character from serial
         
         Args:
@@ -117,6 +117,8 @@ class AtClient:
         if printable_char(c, self._debug_raw):
             self._rx_buffer += chr(c)
             return True
+        else:
+            _log.warning('Unprintable byte: %s', hex(c))
         return ignore_unprintable
     
     def _last_char_read(self, n: int = 1) -> int:
