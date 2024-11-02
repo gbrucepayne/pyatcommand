@@ -30,6 +30,14 @@ class AtConfig:
         return f'{self.cr}{self.lf}'
 
 
+_dprint_map = {
+    '\r': '<cr>',
+    '\n': '<lf>',
+    '\b': '<bs>',
+    '\t': '<th>',
+}
+
+
 def printable_char(c: int, debug: bool = False) -> bool:
     """Determine if a character is printable.
     
@@ -38,13 +46,9 @@ def printable_char(c: int, debug: bool = False) -> bool:
     """
     printable = True
     to_print: str = ''
-    if c == ord('\b'):
-        to_print = '<bs>'
-    elif c == ord('\n'):
-        to_print = '<lf>'
-    elif c == ord('\r'):
-        to_print = '<cr>'
-    elif (c < 32 or c > 125):
+    if chr(c) in _dprint_map:
+        to_print = _dprint_map[chr(c)]
+    elif (c < 32 or c > 126):
         printable = False
         to_print = f'[{c}]'
     else:
@@ -54,11 +58,10 @@ def printable_char(c: int, debug: bool = False) -> bool:
     return printable
 
 
-def dprint(raw_string: str) -> str:
+def dprint(printable: str) -> str:
     """Get a printable string on a single line."""
-    printable = raw_string.replace('\b', '<bs>')
-    printable = printable.replace('\n', '<lf>')
-    printable = printable.replace('\r', '<cr>')
+    for k in _dprint_map:
+        printable = printable.replace(k, _dprint_map[k])
     return printable
 
 
