@@ -19,11 +19,11 @@ class AtConfig:
         self.verbose: bool = True
         self.quiet: bool = False
         self.crc: bool = False
-        self.cr: int = AT_CR
-        self.lf: int = AT_LF
-        self.bs: int = AT_BS
-        self.sep: int = AT_SEP
-        self.crc_sep: int = AT_CRC_SEP
+        self.cr: str = AT_CR
+        self.lf: str = AT_LF
+        self.bs: str = AT_BS
+        self.sep: str = AT_SEP
+        self.crc_sep: str = AT_CRC_SEP
     
     @property
     def terminator(self) -> str:

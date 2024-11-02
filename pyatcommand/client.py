@@ -121,7 +121,7 @@ class AtClient:
             _log.warning('Unprintable byte: %s', hex(c))
         return ignore_unprintable
     
-    def _last_char_read(self, n: int = 1) -> int:
+    def _last_char_read(self, n: int = 1) -> str:
         """Get the nth last character read"""
         if n <= 0 or len(self._rx_buffer) < n:
             return -1
@@ -367,30 +367,36 @@ class AtClient:
             return AtParsing.CRC
         return AtParsing.ERROR
     
-    def check_urc(self,
-                  read_until: str = None,
-                  timeout: float = AT_URC_TIMEOUT,
-                  prefix: int = '+',
-                  wait: float = 0) -> bool:
+    def check_urc(self, **kwargs) -> bool:
         """Check for an unsolicited result code.
         
         Call `get_response()` to retrieve the code if present.
         
         Args:
-            read_until: Optional terminating string (default `\r\n`)
-            timeout: Maximum seconds to wait for completion if data is found
-            prefix: The expected prefix for a URC (default `+`)
-            wait: Optional additional seconds to wait for the prefix
+            **read_until (str): Optional terminating string (default `<cr><lf>`)
+            **timeout (float): Maximum seconds to wait for completion if data
+            is found (default `AT_URC_TIMEOUT` 0.3 seconds)
+            **prefix (str): Optional expected prefix for a URC (default `+`)
+            **prefixes (list[str]): Optional multiple prefix options
+            **wait: Optional additional seconds to wait for the prefix
         
         Returns:
             True if a URC was found.
         """
+        wait = kwargs.get('wait', 0)
+        assert isinstance(wait, int)
         if wait == 0 and self._serial.in_waiting == 0:
             return False
         self.ready.wait()
         self.ready.clear()
-        if read_until is None:
-            read_until = self.terminator
+        prefixes = kwargs.get('prefixes', ['+', '%'])
+        assert isinstance(prefixes, list)
+        assert all(isinstance(x, str) for x in prefixes)
+        prefix = kwargs.get('prefix')
+        if prefix and prefix not in prefixes:
+            prefixes.append(prefix)
+        read_until = kwargs.get('read_until', self.terminator)
+        timeout = kwargs.get('timeout', AT_URC_TIMEOUT)
         timeout += wait
         if vlog(VLOG_TAG):
             _log.debug('Processing URC until %s or %d',
@@ -408,7 +414,8 @@ class AtClient:
                 self._cmd_error = AtErrorCode.ERR_BAD_BYTE
                 break
             if not urc_found:
-                if self._last_char_read() == prefix:
+                if self._last_char_read() in prefixes:
+                    prefix = self._last_char_read()
                     urc_found = True
                     if (not self._rx_buffer.startswith(self.terminator) and
                         not self._rx_buffer.startswith(prefix)):
