@@ -422,7 +422,7 @@ class AtClient:
                         self._toggle_raw(False)
                         _log.warning('Dumping pre-URC data: %s',
                                      dprint(self._rx_buffer))
-                        self._rx_buffer = chr(prefix)
+                        self._rx_buffer = prefix
                         self._toggle_raw(True)
             elif (len(self._rx_buffer) > len(read_until) and
                   self._rx_buffer.endswith(read_until)):
