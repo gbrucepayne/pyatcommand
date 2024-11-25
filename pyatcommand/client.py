@@ -5,11 +5,14 @@ import os
 import threading
 import time
 
+from dotenv import load_dotenv
 from serial import Serial, SerialException
 
 from .constants import AT_TIMEOUT, AT_URC_TIMEOUT, AtErrorCode, AtParsing
 from .utils import AtConfig, dprint, printable_char, vlog
 from .crcxmodem import validate_crc
+
+load_dotenv()
 
 VLOG_TAG = 'atclient'
 AT_RAW = os.getenv('AT_RAW') in [1, 'true', 'True', 'TRUE']
@@ -21,9 +24,17 @@ _log = logging.getLogger(__name__)
 
 class AtClient:
     """A class for interfacing to a modem from a client device."""
-    def __init__(self, autoconfig: bool = True) -> None:
-        """Instantiate a modem."""
-        self._autoconfig = autoconfig
+    def __init__(self, **kwargs) -> None:
+        """Instantiate a modem client interface.
+        
+        Args:
+            **autoconfig (bool): Automatically detects verbose configuration
+                (default True)
+        """
+        self._autoconfig = kwargs.get('autoconfig', True)
+        self._supported_baudrates = [
+            9600, 115200, 57600, 38400, 19200, 4800, 2400
+        ]
         self._rx_buffer = ''
         self._cmd_pending = ''
         self._res_parsing: AtParsing = AtParsing.NONE
@@ -75,32 +86,68 @@ class AtClient:
     def res_err(self) -> str:
         return f'{AtErrorCode.ERROR}{self._config.cr}'
     
-    def connect(self, port: str, baudrate: int = 9600, **kwargs) -> None:
-        """Connect to a serial port"""
+    def connect(self, **kwargs) -> None:
+        """Connect to a serial port AT command interface.
+        
+        Attempts to connect and validate response to a basic `AT` query.
+        If no valid response is received, cycles through baud rates retrying
+        until `retry_timeout` (default forever).
+        
+        Args:
+            **port (str): The serial port name.
+            **baudrate (int): The serial baud rate (default 9600).
+            **retry_timeout (float): Maximum time (seconds) to retry connection
+                (default 0 = forever)
+            
+        Raises:
+            `ConnectionError` if unable to connect.
+            
+        """
+        port = kwargs.pop('port', os.getenv('SERIAL_PORT', '/dev/ttyUSB0'))
+        retry_timeout = kwargs.pop('retry_timeout', 0)
+        retry_delay = kwargs.pop('retry_delay', 0.5)
+        if not isinstance(retry_timeout, (int, float)) or retry_timeout < 0:
+            raise ValueError('Invalid retry_timeout')
         try:
-            self._serial = Serial(port, baudrate, **kwargs)
-        except SerialException:
-            _log.error('Unable to open port %s', port)
+            baudrate = kwargs.get('baudrate', 9600)
+            _log.debug('Attempting to connect to %s at %d baud', port, baudrate)
+            self._serial = Serial(port, **kwargs)
+        except SerialException as err:
+            raise ConnectionError('Unable to open port') from err
+        start_time = time.time()
+        while not self.is_connected():
+            if retry_timeout and time.time() - start_time > retry_timeout:
+                raise ConnectionError('Timed out trying to connect')
+            time.sleep(retry_delay)
+            idx = self._supported_baudrates.index(self._serial.baudrate) + 1
+            if idx >= len(self._supported_baudrates):
+                idx = 0
+            self._serial.baudrate = self._supported_baudrates[idx]
+            _log.debug('Attempting to connect to %s at %d baud',
+                       port, self._serial.baudrate)
+        _log.debug('Connected to %s at %d baud', port, self._serial.baudrate)
     
     def is_connected(self) -> bool:
         """Check if the modem is responding to AT commands"""
+        if not isinstance(self._serial, Serial):
+            return False
         _log.debug('Checking connectivity...')
         valid_results = [AtErrorCode.OK, AtErrorCode.ERR_CMD_CRC]
         valid = self.send_at_command('AT') in valid_results
-        self.get_response()
+        _ = self.get_response()   # clear any residual from read buffer
         return valid
         
-    @property
-    def baudrate(self) -> 'int|None':
-        if self._serial is None:
-            return None
-        return self._serial.baudrate
-    
     def disconnect(self) -> None:
         """Diconnect from the serial port"""
         if isinstance(self._serial, Serial):
             self._serial.close()
             self._serial = None
+    
+    @property
+    def baudrate(self) -> 'int|None':
+        if self._serial is None:
+            return None
+        return self._serial.baudrate
     
     def _read_serial_char(self, ignore_unprintable: bool = True) -> bool:
         """Read the next valid ASCII character from serial
