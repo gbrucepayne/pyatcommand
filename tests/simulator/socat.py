@@ -9,6 +9,7 @@ DTE (Data Terminal Equipment) represents the computer talking to the modem.
 import logging
 import json
 import os
+import signal
 import subprocess
 import threading
 import time
@@ -65,7 +66,8 @@ class SerialBridge:
         self._process = subprocess.Popen(cmd,
                                          stdout=subprocess.PIPE,
                                          stderr=subprocess.PIPE,
-                                         shell=True)
+                                         shell=True,
+                                         preexec_fn=os.setsid)
         self._stdout, self._stderr = self._process.communicate()
         
     def start(self):
@@ -77,7 +79,8 @@ class SerialBridge:
         time.sleep(SOCAT_SETUP_DELAY_S)
     
     def stop(self):
-        self._process.kill()
+        # self._process.kill()
+        os.killpg(os.getpgid(self._process.pid), signal.SIGTERM)
         if self._stderr:
             _log.error('%s', self._stderr)
 
