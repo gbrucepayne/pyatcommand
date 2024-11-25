@@ -21,7 +21,7 @@ from serial.tools.list_ports import comports
 BAUDRATE = int(os.getenv('BAUDRATE', '9600'))
 DCE = os.getenv('DCE', './simdce')
 DTE = os.getenv('DTE', './simdte')
-COMMAND_FILE = os.getenv('COMMAND_FILE')
+COMMAND_FILE = os.getenv('COMMAND_FILE', './tests/simulator/commands.json')
 SOCAT_SETUP_DELAY_S = 1
 LOOPBACK_INTERVAL_S = 10
 
@@ -95,7 +95,11 @@ class ModemSimulator:
         self.baudrate: int = BAUDRATE
         self._request: str = ''
     
-    def start(self, port: str, baudrate: int = BAUDRATE, command_file: str = None):
+    def start(self,
+              port: str = DCE,
+              baudrate: int = BAUDRATE,
+              command_file: str = None,
+              ):
         if self._running:
             return
         self._running = True
@@ -168,90 +172,6 @@ class ModemSimulator:
 
 def _debugf(debug_str: str) -> str:
     return debug_str.replace('\r', '<cr>').replace('\n', '<lf>')
-
-
-#TODO: remove
-# def socat(dte: str = DTE, dce: str = DCE, debug: bool = False):
-#     """Start a socat proxy for a given source to a given target.
-    
-#     Basically a virtual serial port bridge.
-    
-#     Args:
-#         dte: The name of the DTE interface to create for the computer to connect
-#         dce: The name of the DCE interface to create representing the modem
-#         debug: If set, prints the output on exit
-
-#     """
-#     cmd = (f'socat -d -d -v pty,rawer,echo=0,link={dte}'
-#            f' pty,rawer,echo=0,link={dce}')
-#     process = subprocess.Popen(cmd,
-#                                stdout=subprocess.PIPE,
-#                                stderr=subprocess.PIPE,
-#                                shell=True)
-#     stdout, stderr = process.communicate()
-#     # TODO: find a way to print just the tty association, not other stuff...
-#     if stdout and debug:
-#         print(f'STDOUT: {stdout}')
-#     if stderr and debug:
-#         print(f'STDERR: {stderr}')
-
-
-# def simulate(dte_port: str = DTE, echo: bool = True):
-#     """Simulates a modem listening and responding to AT commands.
-    
-#     Args:
-#         dte_name: The name of the computer serial port
-#         dce_name: The name of the modem serial port
-#         echo: Flag indicating if echo is enabled
-    
-#     """
-#     _log.info(">>> Starting modem simulator on %s at %d baud",
-#               dte_port, BAUDRATE)
-#     supported_commands = 
-#     dte = serial.Serial(dte_port, BAUDRATE)
-#     try:
-#         print(f'>>>> Starting AT simulator bridging modem {dce_name}'
-#               f' to {dte_name} at {BAUDRATE} baud')
-#         socat_thread = threading.Thread(target=socat,
-#                                         args=(dte_name, dce_name),
-#                                         daemon=True)
-#         socat_thread.start()
-#         time.sleep(1)
-#         dce = serial.Serial(port=dce_name, baudrate=BAUDRATE)
-
-#         def dce_write(data: str, delay: float = 0):
-#             time.sleep(delay)
-#             dce.write(data.encode())
-
-#         TERMINATOR = '\r'
-#         ok_responses = ['AT', 'ATZ', 'AT&W']
-#         verbose_ok = '\r\nOK\r\n'
-#         verbose_error = '\r\nERROR\r\n'
-#         last_error = None
-#         rx_data: str = ''
-#         while dce.is_open:
-#             if dce.in_waiting > 0:
-#                 char = dce.read(dce.in_waiting).decode()
-#                 if echo:
-#                     dce_write(char)
-#                 rx_data += char
-#                 if char == TERMINATOR:
-#                     rx_data = rx_data.strip()
-#                     if rx_data.upper() == 'QUIT':
-#                         dce_write('Exiting...')
-#                         break
-#                     elif rx_data.upper() in ok_responses:
-#                         dce_write(verbose_ok)
-#                     else:
-#                         # TODO: %CRC, %OFF, %TRK, %UTC
-#                         logging.warning(f'AT command {rx_data} unsupported')
-#                         dce_write(verbose_error)
-#                     rx_data = ''
-#     finally:
-#         if dce and dce.is_open:
-#             dce.close()
-#         socat_thread.join()
-#         print('<<<< Exiting AT simulator')
 
 
 def loopback_test(ser: serial.Serial) -> bool:
