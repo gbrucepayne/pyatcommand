@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "pyatcommand"
-version = "0.1.5"
+version = "0.2.0"
 description = "An interface for V.25 Hayes AT commands"
 authors = ["gbrucepayne <gbrucepayne@hotmail.com>"]
 license = "MIT"
@@ -8,10 +8,17 @@ license = "MIT"
 [tool.poetry.dependencies]
 python = "^3.9"
 pyserial = "^3.5"
+python-dotenv = "^1.0.1"
 
 [tool.poetry.dev-dependencies]
 pylint = "^3.2.3"
 pytest = "^8.2.2"
+
+[tool.pytest.ini_options]
+log_cli = true
+log_cli_level = "DEBUG"
+log_cli_format = "%(asctime)s,[%(levelname)s],(%(threadName)s),%(module)s.%(funcName)s:%(lineno)s,%(message)s"
+log_cli_date_format = "%Y-%m-%d %H:%M:%S"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]
