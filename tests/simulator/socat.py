@@ -79,10 +79,13 @@ class SerialBridge:
         time.sleep(SOCAT_SETUP_DELAY_S)
     
     def stop(self):
-        # self._process.kill()
-        os.killpg(os.getpgid(self._process.pid), signal.SIGTERM)
-        if self._stderr:
-            _log.error('%s', self._stderr)
+        try:
+            # self._process.kill()
+            os.killpg(os.getpgid(self._process.pid), signal.SIGTERM)
+            if self._stderr:
+                _log.error('%s', self._stderr)
+        except Exception as err:
+            _log.error('Serial bridge stop: %s', err)
 
 
 class ModemSimulator:
@@ -159,13 +162,22 @@ class ModemSimulator:
                         _log.error('Unsupported command: %s', self._request)
                         response = VRES_ERR if self.verbose else RES_ERR
                     if response:
-                        _log.debug('Sending response: %s\n', _debugf(response))
+                        _log.debug('Sending response: %s', _debugf(response))
                         self._ser.write(response.encode())
                     self._request = ''
                 except (UnicodeDecodeError, UnprintableException):
                     _log.error('Bad byte received [%d] - clearing buffer\n',
                                b[0])
                     self._request = ''
+    
+    def inject_urc(self, urc: str):
+        """Inject an unsolicited response code."""
+        if not isinstance(urc, str) or not urc:
+            _log.error('Invalid URC')
+            return
+        urc = f'\r\n{urc}\r\n' if self.verbose else f'{urc}\r\n'
+        _log.debug('Sending URC: %s', _debugf(urc))
+        self._ser.write(urc.encode())
     
     def stop(self):
         self._running = False
