@@ -195,6 +195,5 @@ def test_thread_safety(mock_serial):
     for thread in threads:
         thread.join()
     for i in range(thread_count):
-        assert(results[i].ok,
-               f'Thread {i} failed or got unexpected response: {vars(results[i])}')
+        assert results[i].ok, f'Thread {i} failed or got unexpected response: {vars(results[i])}'
     interface.disconnect()
