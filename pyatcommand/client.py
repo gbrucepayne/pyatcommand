@@ -10,7 +10,7 @@ from queue import Queue, Empty
 import serial
 from dotenv import load_dotenv
 
-from .constants import AT_TIMEOUT, AT_URC_TIMEOUT, AtErrorCode, AtParsing
+from .constants import AT_TIMEOUT, AtErrorCode, AtParsing
 from .utils import AtConfig, dprint, printable_char, vlog
 from .crcxmodem import validate_crc
 
@@ -338,7 +338,10 @@ class AtClient:
             finally:
                 self._cmd_pending = ''
     
-    def _get_at_response(self, response: str, prefix: str = '') -> AtResponse:
+    def _get_at_response(self,
+                         response: str,
+                         prefix: str = '',
+                         queried: bool = False) -> AtResponse:
         """Convert a raw response to `AtResponse`"""
         at_response = AtResponse()
         parts = [x for x in response.strip().split(self.trailer_info) if x]
@@ -347,7 +350,7 @@ class AtClient:
         if self._config.crc_sep in parts[-1]:
             _ = parts.pop()   # remove CRC
             at_response.crc_ok = validate_crc(response, self._config.crc_sep)
-        if not self._cmd_pending:
+        if not self._cmd_pending and not queried:
             at_response.result = AtErrorCode.URC
             at_response.info = '\n'.join(parts)
         elif parts[-1].startswith(('OK', '0')):
@@ -439,7 +442,7 @@ class AtClient:
                 self._response_queue.put(line)
             else:
                 self._unsolicited_queue.put(line)
-                _log.debug('Processed URC (%s)', line)
+                _log.debug('Processed URC: %s', dprint(line))
             self._res_parsing = AtParsing.NONE
             return ''
         
@@ -540,7 +543,7 @@ class AtClient:
             self._cmd_error = AtErrorCode.ERR_TIMEOUT
         else:
             self._rx_buffer = response
-            at_response = self._get_at_response(response)
+            at_response = self._get_at_response(response, queried=True)
             self._cmd_error = at_response.result
             self._res_ready = at_response.ok
         return self._cmd_error
