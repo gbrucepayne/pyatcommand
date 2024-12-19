@@ -179,6 +179,12 @@ class ModemSimulator:
         _log.debug('Sending URC: %s', _debugf(urc))
         self._ser.write(urc.encode())
     
+    def multi_urc(self, urcs: 'list[str]'):
+        """Inject multiple unsolicited outputs."""
+        chained = '\r\n' + '\r\n\r\n'.join(urc for urc in urcs) + '\r\n'
+        _log.debug('Sending chained URCS: %s', _debugf(chained))
+        self._ser.write(chained.encode())
+    
     def stop(self):
         self._running = False
         if self._thread:
