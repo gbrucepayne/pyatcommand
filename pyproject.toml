@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "pyatcommand"
-version = "0.3.1"
+version = "0.3.2"
 description = "An interface for V.25 Hayes AT commands"
 authors = ["gbrucepayne <gbrucepayne@hotmail.com>"]
 license = "MIT"
