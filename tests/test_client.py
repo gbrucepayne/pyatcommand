@@ -1,10 +1,11 @@
 import logging
 import os
 import pytest
+import queue
 import random
 import threading
 import time
-from unittest.mock import MagicMock, patch
+from unittest.mock import Mock, patch
 
 from pyatcommand import AtClient, AtErrorCode
 from .simulator.socat import SerialBridge, ModemSimulator, DTE, COMMAND_FILE
@@ -19,49 +20,82 @@ def log_verbose():
     # os.environ['AT_RAW'] = 'true'
 
 
+class MockSerial:
+    """Mock replacement for serial.Serial to simulate serial communication."""
+    def __init__(self, *args, **kwargs):
+        self._read_buffer = queue.Queue()
+        self._response = []
+        self._lock = threading.Lock()
+        self.is_open = True
+        self.echo = kwargs.pop('echo', True)
+        self.delay = 0
+        self.timeout = kwargs.get('timeout', None)
+        self.baudrate = kwargs.get('baudrate', 9600)
+    
+    def write(self, data: bytes):
+        """Simulate writing data to the serial interface."""
+        time.sleep(self.delay)
+        with self._lock:
+            if self.echo:
+                for byte in data:
+                    self._read_buffer.put(byte)
+            if not self._response or len(self._response) == 0:
+                self._response = b'\r\nOK\r\n'
+            for byte in self._response:
+                self._read_buffer.put(byte)
+            self._response = b''
+                    
+    
+    def read(self, size=1) -> bytes:
+        """Simulate reading data from serial interface."""
+        result = b''
+        with self._lock:
+            for _ in range(size):
+                if not self._read_buffer.empty():
+                    result += bytes([self._read_buffer.get()])
+        return result
+    
+    @property
+    def in_waiting(self) -> int:
+        return self._read_buffer.qsize()
+    
+    def flush(self):
+        """Stub flushing the write queue."""
+        return
+    
+    def close(self):
+        """Simulate closing the port."""
+        self.is_open = False
+    
+    def reset_buffers(self):
+        """Clear the simulated buffers"""
+        with self._lock:
+            while not self._read_buffer.empty():
+                self._read_buffer.get()
+    
+    def set_response(self, data: bytes):
+        with self._lock:
+            self._response = data
+
+
 @pytest.fixture
 def mock_serial():
-    with patch('serial.Serial') as mock_serial_class:
-        mock_instance = MagicMock()
-        mock_serial_class.return_value = mock_instance
-        mock_instance.baudrate = 9600
-        mock_instance.delay = 0
-        
-        class SerialMockBuffer:
-            def __init__(self, initial_buffer):
-                self.buffer = None
-                self.buffer_iter = None
-                self.set_buffer(initial_buffer)
-            
-            def set_buffer(self, new_buffer):
-                self.buffer = new_buffer
-                self.buffer_iter = iter(self.buffer)
-            
-            def read(self, size):
-                ba = []
-                for _ in range(size):
-                    b = next(self.buffer_iter, None)
-                    if b is not None:
-                        ba.append(b)
-                return bytes(ba)
-        
-        serial_buffer = SerialMockBuffer(b'\r\nOK\r\n')
-        
-        def mock_write(data):
-            if mock_instance.delay:
-                logger.info('Mock delay %0.1f seconds', mock_instance.delay)
-                time.sleep(mock_instance.delay)
-            serial_buffer.set_buffer(b'\r\nOK\r\n')
-        
-        mock_instance.write.side_effect = mock_write
-        mock_instance.read.side_effect = lambda size: serial_buffer.read(size)
-        mock_instance.in_waiting = len(serial_buffer.buffer)
-        yield mock_instance, serial_buffer
+    with patch('serial.Serial', new=MockSerial) as mock:
+        yield mock
 
 
 @pytest.fixture
-def client():
+def cclient():
     return AtClient()
+
+
+@pytest.fixture
+def cclient():
+    """Connected client"""
+    client = AtClient()
+    client.connect(port=DTE, retry_timeout=5)
+    yield client
+    client.disconnect()
 
 
 @pytest.fixture
@@ -80,88 +114,81 @@ def simulator():
     simulator.stop()
 
 
-def test_connect_invalid_port(client: AtClient):
+def test_connect_invalid_port(cclient: AtClient):
     with pytest.raises(ConnectionError):
-        client.connect(port='COM99')
+        cclient.connect(port='COM99')
 
 
-def test_connect_no_response(client: AtClient):
+def test_connect_no_response(cclient: AtClient):
     with pytest.raises(ConnectionError):
-        client.connect(retry_timeout=5)
+        cclient.connect(retry_timeout=5)
 
 
-def test_connect(log_verbose, bridge: SerialBridge, simulator: ModemSimulator, client: AtClient):
-    client.connect(port=DTE, retry_timeout=5, ati=True)
-    assert client.is_connected()
-    client.disconnect()
+def test_connect(log_verbose, bridge: SerialBridge, simulator: ModemSimulator, cclient: AtClient):
+    cclient.connect(port=DTE, retry_timeout=5, ati=True)
+    assert cclient.is_connected()
+    cclient.disconnect()
 
 
-def test_old_response(bridge: SerialBridge, simulator: ModemSimulator, client: AtClient):
-    client.connect(port=DTE, retry_timeout=5)
-    assert client.send_at_command('AT+GMI', timeout=3) == AtErrorCode.OK
-    response = client.get_response()
+def test_old_response(bridge: SerialBridge, simulator: ModemSimulator, cclient: AtClient):
+    assert cclient.send_at_command('AT+GMI', timeout=3) == AtErrorCode.OK
+    response = cclient.get_response()
     assert isinstance(response, str) and len(response) > 0
 
 
-def test_old_response_prefix(bridge: SerialBridge, simulator: ModemSimulator, client: AtClient):
-    client.connect(port=DTE, retry_timeout=5)
-    assert client.send_at_command('AT+CGDCONT?', timeout=3) == AtErrorCode.OK
-    response = client.get_response('+CGDCONT:')
+def test_old_response_prefix(bridge: SerialBridge, simulator: ModemSimulator, cclient: AtClient):
+    assert cclient.send_at_command('AT+CGDCONT?', timeout=3) == AtErrorCode.OK
+    response = cclient.get_response('+CGDCONT:')
     assert isinstance(response, str) and len(response) > 0 and '+CGDCONT' not in response
 
 
-def test_old_check_urc(bridge, simulator: ModemSimulator, client: AtClient):
-    client.connect(port=DTE, retry_timeout=5)
+def test_old_check_urc(bridge, simulator: ModemSimulator, cclient: AtClient):
     urc = '+URC: Test'
     simulator.inject_urc(urc)
     received = False
     start_time = time.time()
     while not received and time.time() - start_time < 10:
-        received = client.check_urc()
+        received = cclient.check_urc()
         if not received:
             time.sleep(0.1)
     if received:
         logger.info('URC latency %0.1f seconds', time.time() - start_time)
     assert received is True
-    assert client.get_response() == urc
+    assert cclient.get_response() == urc
 
     
-def test_send_command(bridge, simulator, client: AtClient):
-    client.connect(port=DTE, retry_timeout=5)
-    at_response = client.send_command('AT+GMI')
+def test_send_command(bridge, simulator, cclient: AtClient):
+    at_response = cclient.send_command('AT+GMI')
     assert at_response.ok
     assert isinstance(at_response.info, str) and len(at_response.info) > 0
 
 
-def test_send_command_crc(bridge, simulator, client: AtClient):
-    client.connect(port=DTE, retry_timeout=5)
-    at_response = client.send_command('AT%CRC=1')
+def test_send_command_crc(bridge, simulator, cclient: AtClient):
+    at_response = cclient.send_command('AT%CRC=1')
     assert at_response.ok
     assert at_response.crc_ok
-    at_response = client.send_command('AT%CRC=0')
+    at_response = cclient.send_command('AT%CRC=0')
     assert not at_response.ok
     assert at_response.crc_ok
 
 
-def test_command_prefix(bridge, simulator, client: AtClient):
-    client.connect(port=DTE, retry_timeout=5)
+def test_command_prefix(bridge, simulator, cclient: AtClient):
     command = 'AT+CGDCONT?'
     prefix = '+CGDCONT:'
-    at_response = client.send_command(command)
+    at_response = cclient.send_command(command)
     assert len(at_response.info) > 0 and prefix in at_response.info
-    at_response = client.send_command(command, prefix=prefix)
+    at_response = cclient.send_command(command, prefix=prefix)
     assert at_response.ok
     assert len(at_response.info) > 0 and prefix not in at_response.info
 
 
-def test_get_urc(bridge, simulator: ModemSimulator, client:AtClient):
-    client.connect(port=DTE, retry_timeout=5)
+def test_get_urc(bridge, simulator: ModemSimulator, cclient:AtClient):
     urc = '+URC: Test'
     simulator.inject_urc(urc)
     received = False
     start_time = time.time()
     while not received and time.time() - start_time < 10:
-        received = client.get_urc()
+        received = cclient.get_urc()
         if not received:
             time.sleep(0.1)
     if received:
@@ -169,15 +196,60 @@ def test_get_urc(bridge, simulator: ModemSimulator, client:AtClient):
     assert received == urc
 
 
+def test_multiline(bridge, simulator: ModemSimulator, cclient: AtClient):
+    """Multiline responses"""
+    response = cclient.send_command('ATI')
+    assert response.ok and len(response.info.split('\n')) > 1
+
+
+def test_multi_urc(bridge, simulator: ModemSimulator, cclient: AtClient):
+    urcs = [
+        '%NOTIFY:"RRCSTATE",2',
+        '%NOTIFY:"RRCSTATE",0',
+        '%NOTIFY:"RRCSTATE",2',
+        '+CEREG: 0,,,,,,,"00111000"',
+    ]
+    simulator.multi_urc(urcs)
+    received_count = 0
+    while received_count < len(urcs):
+        if cclient.get_urc():
+            received_count += 1
+    assert received_count == len(urcs)
+
+
+def test_urc_send_race(bridge, simulator: ModemSimulator, cclient: AtClient):
+    """Try to emulate a command being sent while a URC is processing."""
+    long_urc = '+LONGURC: ' + 'x' * 25
+    chained_urcs = [long_urc] * 3
+    
+    def urc_trigger():
+        urcs_rcvd = 0
+        simulator.multi_urc(chained_urcs)
+        while urcs_rcvd < len(chained_urcs):
+            if cclient.get_urc():
+                urcs_rcvd += 1
+        assert urcs_rcvd == len(chained_urcs)
+    
+    def command_trigger():
+        cmd_res = cclient.send_command('AT+GDELAY?', timeout=3)
+        assert cmd_res is not None and cmd_res.ok
+    
+    urc_thread = threading.Thread(target=urc_trigger, name='UrcTestThread', daemon=True)
+    cmd_thread = threading.Thread(target=command_trigger, name='CmdTestThread', daemon=True)
+    urc_thread.start()
+    cmd_thread.start()
+    urc_thread.join()
+    cmd_thread.join()
+
+
 def test_thread_safety(mock_serial):
-    mock_serial_instance, serial_buffer = mock_serial
     interface = AtClient()
     interface.connect(port='/dev/ttyUSB99')
     
     def send_at_command(thread_id, results):
         try:
             rng = random.Random()
-            mock_serial_instance.delay = rng.random() * 2
+            mock_serial.delay = rng.random() * 2
             response = interface.send_command(f'AT+TEST{thread_id}')
             results[thread_id] = response
         except Exception as e:
