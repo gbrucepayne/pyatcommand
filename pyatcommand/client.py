@@ -337,7 +337,7 @@ class AtClient:
             timeout = self._command_timeout
         raw = kwargs.get('raw', False)
         with self._lock:
-            if not self._rx_ready.is_set():
+            if vlog(VLOG_TAG) and not self._rx_ready.is_set():
                 _log.debug('Waiting for RX ready')
             self._rx_ready.wait()
             while not self._response_queue.empty():
@@ -363,7 +363,7 @@ class AtClient:
                     return response
                 return self._get_at_response(response, prefix)
             except Empty:
-                _log.warning('Command response timeout (%s)', command)
+                _log.warning('Command response timeout for: %s', command)
                 return None
             finally:
                 self._cmd_pending = ''
@@ -473,7 +473,8 @@ class AtClient:
                 _log.debug('More RX data to process')
             else:
                 self._rx_ready.set()
-                _log.debug('RX ready')
+                if vlog(VLOG_TAG):
+                    _log.debug('RX ready')
             self._res_parsing = AtParsing.NONE
             return ''
         
@@ -486,7 +487,8 @@ class AtClient:
                 if self._serial.in_waiting > 0 or peeked:
                     if self._rx_ready.is_set():
                         self._rx_ready.clear()
-                        _log.debug('RX busy')
+                        if vlog(VLOG_TAG):
+                            _log.debug('RX busy')
                     if not self._is_debugging_raw:
                         self._toggle_raw(True)
                     if peeked:
