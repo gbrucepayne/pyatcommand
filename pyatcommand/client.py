@@ -51,7 +51,7 @@ class AtClient:
         self._is_debugging_raw = False
         self._config: AtConfig = AtConfig()
         self._serial: serial.Serial = None
-        self._timeout: 'float|None' = kwargs.get('timeout', 0)
+        self._timeout: 'float|None' = kwargs.get('timeout', 0)   # serial read timeout
         self._lock = threading.Lock()
         self._response_queue = Queue()
         self._response = None
@@ -63,6 +63,10 @@ class AtClient:
         crc_cmd = kwargs.get('crc_cmd')
         if crc_cmd:
             self.crc_command = crc_cmd
+        self._command_timeout = AT_TIMEOUT
+        command_timeout = kwargs.get('command_timeout')
+        if command_timeout:
+            self.command_timeout = command_timeout
         self._is_initialized: bool = False
         self._rx_ready = threading.Event()
         self._rx_ready.set()
@@ -151,8 +155,18 @@ class AtClient:
         return '+CME ERROR:'
     
     @property
-    def cmd_pending(self) -> str:
+    def command_pending(self) -> str:
         return self._cmd_pending.strip()
+    
+    @property
+    def command_timeout(self) -> float:
+        return self._command_timeout
+    
+    @command_timeout.setter
+    def command_timeout(self, value: 'float|None'):
+        if value is not None and not isinstance(value, (float, int)) or value < 0:
+            raise ValueError('Invalid default command timeout')
+        self._command_timeout = value
     
     def _debug_raw(self) -> bool:
         """Check if environment is configured for raw serial debug."""
@@ -303,7 +317,7 @@ class AtClient:
     
     def send_command(self,
                      command: str,
-                     timeout: 'float|None' = 1,
+                     timeout: 'float|None' = AT_TIMEOUT,
                      prefix: str = '',
                      **kwargs) -> 'AtResponse|str':
         """Send an AT command and get the response.
@@ -317,10 +331,10 @@ class AtClient:
         if not isinstance(command, str) or not command:
             raise ValueError('Invalid command')
         if timeout is not None:
-            if (not isinstance(timeout, (float, int)) or
-                (self._timeout and timeout < self._timeout)):
-                raise ValueError('Invalid timeout must be > %0.1f',
-                                    self._timeout)
+            if not isinstance(timeout, (float, int)) or timeout < 0:
+                raise ValueError('Invalid command timeout')
+        if timeout == AT_TIMEOUT and self._command_timeout != AT_TIMEOUT:
+            timeout = self._command_timeout
         raw = kwargs.get('raw', False)
         with self._lock:
             if not self._rx_ready.is_set():
@@ -493,8 +507,8 @@ class AtClient:
                         if vlog(VLOG_TAG + 'dev'):
                             self._toggle_raw(False)
                             _log.debug('Assessing CR: %s', dprint(buffer))
-                        if (self.cmd_pending and self.cmd_pending in line):
-                            if not line.startswith(self.cmd_pending):
+                        if (self.command_pending and self.command_pending in line):
+                            if not line.startswith(self.command_pending):
                                 _log.debug('Assessing pre-echo URC race condition')
                                 pattern = r'\r\n.*?\r\n'
                                 urcs = re.findall(pattern, buffer, re.DOTALL)
