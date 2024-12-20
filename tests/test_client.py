@@ -7,10 +7,14 @@ import threading
 import time
 from unittest.mock import Mock, patch
 
+from serial.tools.list_ports import comports
+
 from pyatcommand import AtClient, AtErrorCode
 from .simulator.socat import SerialBridge, ModemSimulator, DTE, COMMAND_FILE
 
 logger = logging.getLogger(__name__)
+
+REAL_UART = os.getenv('REAL_UART', '/dev/ttyUSB0')
 
 
 @pytest.fixture
@@ -138,9 +142,11 @@ def test_ati_log_output(caplog, bridge, simulator, client: AtClient):
     client.disconnect()
 
 
+@pytest.mark.skipif(not any(port.device == REAL_UART for port in comports()),
+                    reason = f'{REAL_UART} not available')
 def test_autobaud(log_verbose):
     """Testing autobaud requires use of a physical serial port."""
-    real_uart = '/dev/ttyUSB1'
+    real_uart = REAL_UART
     unlikely_baud = 2400
     client = AtClient()
     with pytest.raises(ConnectionError):
@@ -182,6 +188,32 @@ def test_legacy_check_urc(bridge, simulator: ModemSimulator, cclient: AtClient):
     assert cclient.get_response() == urc
 
     
+def test_legacy_then_urc(bridge, simulator: ModemSimulator, cclient: AtClient):
+    urc = '+URC: Test'
+    assert cclient.send_at_command('AT+GMI', timeout=3) == AtErrorCode.OK
+    assert cclient.is_response_ready() is True
+    response = cclient.get_response()
+    assert cclient.is_response_ready() is False
+    assert response == 'Simulated Modems Inc'
+    assert cclient.ready.is_set()
+    simulator.inject_urc(urc)
+    received = False
+    start_time = time.time()
+    while not received and time.time() - start_time < 10:
+        received = cclient.check_urc()
+        if not received:
+            time.sleep(0.1)
+    if received:
+        logger.info('URC latency %0.1f seconds', time.time() - start_time)
+    assert received is True
+    assert cclient.is_response_ready() is True
+    assert cclient.get_response() == urc
+    assert cclient.is_response_ready() is False
+    assert cclient.send_at_command('AT+GMI', timeout=3) == AtErrorCode.OK
+    response = cclient.get_response()
+    assert response == 'Simulated Modems Inc'
+
+
 def test_send_command(bridge, simulator, cclient: AtClient):
     at_response = cclient.send_command('AT+GMI')
     assert at_response.ok

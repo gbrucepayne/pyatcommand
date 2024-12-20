@@ -64,6 +64,7 @@ class AtClient:
         self.auto_crc: bool = kwargs.get('auto_crc', False)
         if not isinstance(self.auto_crc, bool):
             raise ValueError('Invalid auto_crc setting')
+        self._cmd_pending: str = ''
         self._command_timeout = AT_TIMEOUT
         command_timeout = kwargs.get('command_timeout')
         if command_timeout:
@@ -75,7 +76,7 @@ class AtClient:
         # legacy backward compatibility below
         self._autoconfig = kwargs.get('autoconfig', True)
         self._rx_buffer = ''
-        self._cmd_pending = ''
+        self._lcmd_pending: str = ''
         self._res_parsing: AtParsing = AtParsing.NONE
         self._res_ready = False
         self._cmd_error: 'AtErrorCode|None' = None
@@ -445,7 +446,7 @@ class AtClient:
         if self._config.crc_sep in parts[-1]:
             _ = parts.pop()   # remove CRC
             at_response.crc_ok = validate_crc(response, self._config.crc_sep)
-        if not self._cmd_pending and not queried:
+        if not (self._cmd_pending or self._lcmd_pending):
             at_response.result = AtErrorCode.URC
             at_response.info = '\n'.join(parts)
         else:
@@ -454,7 +455,7 @@ class AtClient:
                 at_response.result = AtErrorCode.OK
             else:
                 at_response.result = AtErrorCode.ERROR
-        if self._cmd_pending and len(parts) > 0:
+        if (self._cmd_pending or self._lcmd_pending) and len(parts) > 0:
             if prefix and parts[0].startswith(prefix):
                 parts[0] = parts[0].replace(prefix, '').strip()
             at_response.info = '\n'.join(parts)
@@ -698,9 +699,9 @@ class AtClient:
         else:
             with self._lock:
                 self.ready.clear()   # pause reading temporarily
-                self._cmd_pending = at_command
+                self._lcmd_pending = at_command
                 self._rx_buffer = response
-                at_response = self._get_at_response(response, queried=True)
+                at_response = self._get_at_response(response)
                 self._cmd_error = at_response.result
                 self._res_ready = at_response.ok
                 self.ready.set()   # re-enable reading
@@ -713,15 +714,19 @@ class AtClient:
         Backward compatible for legacy integrations.
         
         Returns:
-            True if a URC was found.
+            `True` if a URC was found.
         """
         if self._unsolicited_queue.qsize() == 0:
             return False
+        if self._res_ready:
+            return True
         try:
             self._rx_buffer = self._unsolicited_queue.get(block=False)
+            self._res_ready = True
             return True
         except Empty:
             _log.error('Unexpected error getting unsolicited from queue')
+        return False
 
     def get_response(self, prefix: str = '', clean: bool = True) -> str:
         """Retrieve the response (or URC) from the Rx buffer and clear it.
@@ -743,6 +748,8 @@ class AtClient:
         if clean:
             res = self._get_at_response(res).info
         self._rx_buffer = ''
+        if self._lcmd_pending:
+            self._lcmd_pending = ''
         self._res_ready = False
         return res
     
