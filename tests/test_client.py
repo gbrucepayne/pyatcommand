@@ -155,7 +155,10 @@ def test_autobaud(log_verbose):
 def test_legacy_response(bridge: SerialBridge, simulator: ModemSimulator, cclient: AtClient):
     assert cclient.send_at_command('AT+GMI', timeout=3) == AtErrorCode.OK
     response = cclient.get_response()
-    assert isinstance(response, str) and len(response) > 0
+    assert response == 'Simulated Modems Inc'
+    assert cclient.send_at_command('ATI') == AtErrorCode.OK
+    response = cclient.get_response()
+    assert len(response) > 0
 
 
 def test_legacy_response_prefix(bridge: SerialBridge, simulator: ModemSimulator, cclient: AtClient):
@@ -182,7 +185,7 @@ def test_legacy_check_urc(bridge, simulator: ModemSimulator, cclient: AtClient):
 def test_send_command(bridge, simulator, cclient: AtClient):
     at_response = cclient.send_command('AT+GMI')
     assert at_response.ok
-    assert isinstance(at_response.info, str) and len(at_response.info) > 0
+    assert at_response.info == 'Simulated Modems Inc'
 
 
 def test_non_verbose(bridge, simulator: ModemSimulator, client: AtClient):
