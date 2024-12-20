@@ -15,6 +15,7 @@ import threading
 import time
 import atexit
 import string
+import re
 
 import serial
 from serial.tools.list_ports import comports
@@ -39,6 +40,7 @@ class UnprintableException(Exception):
 
 
 class SerialBridge:
+    """A `socat` bridge between 2 physical and/or virtual serial ports."""
     def __init__(self, dte: str = DTE, dce: str = DCE, baudrate: int = BAUDRATE) -> None:
         self.dte: str = dte
         self.dce: str = dce
@@ -89,6 +91,7 @@ class SerialBridge:
 
 
 class ModemSimulator:
+    """A simulator for an AT command driven modem."""
     def __init__(self) -> None:
         self.echo: bool = True
         self.verbose: bool = True
@@ -98,43 +101,58 @@ class ModemSimulator:
         self._running: bool = False
         self._thread: threading.Thread = None
         self._ser: serial.Serial = None
-        self.baudrate: int = BAUDRATE
+        self._baudrate: int = BAUDRATE
         self._request: str = ''
+    
+    @property
+    def baudrate(self) -> int:
+        return self._baudrate
+    
+    @baudrate.setter
+    def baudrate(self, value: int):
+        if not isinstance(value, int) or value <= 0:
+            raise ValueError('Invalid baudrate')
+        self._baudrate = value
+        if self._ser and self._ser.baudrate != self._baudrate:
+            _log.warning('Changing active serial baudrate to %d', self._baudrate)
+            self._ser.baudrate = self._baudrate
     
     def start(self,
               port: str = DCE,
-              baudrate: int = BAUDRATE,
+              baudrate: int = None,
               command_file: str = None,
               ):
         if self._running:
             return
         self._running = True
+        if isinstance(baudrate, int):
+            self.baudrate = baudrate
         if command_file:
             try:
                 with open(command_file) as f:
                     self.commands = json.load(f)
                 #TODO: validate structure
-                _log.info('Commands: %s', json.dumps(self.commands))
+                _log.info('Using commands: %s', json.dumps(self.commands))
             except Exception as exc:
                 _log.error(exc)
         try:
-            self._ser = serial.Serial(port, baudrate)
+            self._ser = serial.Serial(port, self.baudrate)
             self._thread = threading.Thread(target=self._run,
                                             name='modem_simulator',
                                             daemon=True)
             self._thread.start()
             _log.info('Starting modem simulation on %s at %d baud',
-                      port, baudrate)
+                      port, self.baudrate)
         except Exception as exc:
             _log.error(exc)
     
     def _run(self):
         while self._running:
-            if not self._ser.is_open:
+            if self._ser and not self._ser.is_open:
                 self.stop()
                 _log.error('DTE not connected')
                 return
-            if self._ser.in_waiting > 0:
+            if self._ser and self._ser.in_waiting > 0:
                 b = self._ser.read()
                 try:
                     c = b.decode()
@@ -147,7 +165,13 @@ class ModemSimulator:
                         continue
                     _log.debug('Processing command: %s', _debugf(self._request))
                     response = ''
-                    if self.commands and self._request in self.commands:
+                    if self._request.lower().startswith('ATE'):
+                        self.echo = self._request.endswith('1')
+                        response = VRES_OK if self.verbose else RES_OK
+                    elif self._request.lower().startswith('ATV'):
+                        self.verbose = self._request.endswith('1')
+                        response = VRES_OK if self.verbose else RES_OK
+                    elif self.commands and self._request in self.commands:
                         res_meta = self.commands[self._request]
                         if isinstance(res_meta, str):
                             response = res_meta
@@ -162,6 +186,10 @@ class ModemSimulator:
                         _log.error('Unsupported command: %s', self._request)
                         response = VRES_ERR if self.verbose else RES_ERR
                     if response:
+                        if not self.verbose:
+                            pattern = r'\r\n.*?\r\n'
+                            lines = re.findall(pattern, response, re.DOTALL)
+                            lines[-1] = lines[-1].strip() + '\r'
                         _log.debug('Sending response: %s', _debugf(response))
                         self._ser.write(response.encode())
                     self._request = ''
