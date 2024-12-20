@@ -247,6 +247,7 @@ class AtClient:
                                                          daemon=True)
                 self._listener_thread.start()
                 if self._initialize(**init_kwargs):
+                    self._stop_event.clear()
                     break
             time.sleep(retry_delay)
             if autobaud:
@@ -447,14 +448,16 @@ class AtClient:
         if not self._cmd_pending and not queried:
             at_response.result = AtErrorCode.URC
             at_response.info = '\n'.join(parts)
-        elif parts[-1].startswith(('OK', '0')):
-            at_response.result = AtErrorCode.OK
         else:
-            at_response.result = AtErrorCode.ERROR
-        if self._cmd_pending and len(parts) > 1:
+            result = parts.pop(-1)
+            if result in ['OK', '0']:
+                at_response.result = AtErrorCode.OK
+            else:
+                at_response.result = AtErrorCode.ERROR
+        if self._cmd_pending and len(parts) > 0:
             if prefix and parts[0].startswith(prefix):
                 parts[0] = parts[0].replace(prefix, '').strip()
-            at_response.info = '\n'.join(parts[0:-1])
+            at_response.info = '\n'.join(parts)
         return at_response
     
     def get_urc(self, timeout: 'float|None' = 0.1) -> 'str|None':
@@ -584,7 +587,7 @@ class AtClient:
         buffer = ''
         peeked = ''
         while not self._stop_event.is_set():
-            if not self._serial:
+            if not self._serial or not self.ready.is_set():
                 continue
             try:
                 while self._serial.in_waiting > 0 or peeked:
@@ -693,10 +696,14 @@ class AtClient:
         if not response:
             self._cmd_error = AtErrorCode.ERR_TIMEOUT
         else:
-            self._rx_buffer = response
-            at_response = self._get_at_response(response, queried=True)
-            self._cmd_error = at_response.result
-            self._res_ready = at_response.ok
+            with self._lock:
+                self.ready.clear()   # pause reading temporarily
+                self._cmd_pending = at_command
+                self._rx_buffer = response
+                at_response = self._get_at_response(response, queried=True)
+                self._cmd_error = at_response.result
+                self._res_ready = at_response.ok
+                self.ready.set()   # re-enable reading
         return self._cmd_error
     
     def check_urc(self, **kwargs) -> bool:
