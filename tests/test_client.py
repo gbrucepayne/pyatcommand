@@ -85,7 +85,7 @@ def mock_serial():
 
 
 @pytest.fixture
-def cclient():
+def client():
     return AtClient()
 
 
@@ -114,35 +114,57 @@ def simulator():
     simulator.stop()
 
 
-def test_connect_invalid_port(cclient: AtClient):
+def test_connect_invalid_port(client: AtClient):
     with pytest.raises(ConnectionError):
-        cclient.connect(port='COM99')
+        client.connect(port='COM99')
 
 
-def test_connect_no_response(cclient: AtClient):
+def test_connect_no_response(client: AtClient):
     with pytest.raises(ConnectionError):
-        cclient.connect(retry_timeout=5)
+        client.connect(retry_timeout=2)
 
 
-def test_connect(log_verbose, bridge: SerialBridge, simulator: ModemSimulator, cclient: AtClient):
-    cclient.connect(port=DTE, retry_timeout=5, ati=True)
-    assert cclient.is_connected()
-    cclient.disconnect()
+def test_connect(log_verbose, bridge: SerialBridge, simulator: ModemSimulator, client: AtClient):
+    client.connect(port=DTE, retry_timeout=2, ati=True)
+    assert client.is_connected()
+    client.disconnect()
 
 
-def test_old_response(bridge: SerialBridge, simulator: ModemSimulator, cclient: AtClient):
+def test_ati_log_output(caplog, bridge, simulator, client: AtClient):
+    """"""
+    caplog.set_level(logging.INFO)
+    client.connect(port=DTE, ati=True)
+    assert "First line" in caplog.text
+    client.disconnect()
+
+
+def test_autobaud(log_verbose):
+    """Testing autobaud requires use of a physical serial port."""
+    real_uart = '/dev/ttyUSB1'
+    unlikely_baud = 2400
+    client = AtClient()
+    with pytest.raises(ConnectionError):
+        client.connect(port=real_uart, baudrate=unlikely_baud, retry_timeout=2, autobaud=False)
+    assert client.is_connected() is False
+    client.connect(port=real_uart, baudrate=unlikely_baud)
+    assert client.is_connected() is True
+    assert client.baudrate != unlikely_baud
+    client.disconnect()
+
+
+def test_legacy_response(bridge: SerialBridge, simulator: ModemSimulator, cclient: AtClient):
     assert cclient.send_at_command('AT+GMI', timeout=3) == AtErrorCode.OK
     response = cclient.get_response()
     assert isinstance(response, str) and len(response) > 0
 
 
-def test_old_response_prefix(bridge: SerialBridge, simulator: ModemSimulator, cclient: AtClient):
+def test_legacy_response_prefix(bridge: SerialBridge, simulator: ModemSimulator, cclient: AtClient):
     assert cclient.send_at_command('AT+CGDCONT?', timeout=3) == AtErrorCode.OK
     response = cclient.get_response('+CGDCONT:')
     assert isinstance(response, str) and len(response) > 0 and '+CGDCONT' not in response
 
 
-def test_old_check_urc(bridge, simulator: ModemSimulator, cclient: AtClient):
+def test_legacy_check_urc(bridge, simulator: ModemSimulator, cclient: AtClient):
     urc = '+URC: Test'
     simulator.inject_urc(urc)
     received = False
@@ -163,13 +185,31 @@ def test_send_command(bridge, simulator, cclient: AtClient):
     assert isinstance(at_response.info, str) and len(at_response.info) > 0
 
 
+def test_non_verbose(bridge, simulator: ModemSimulator, client: AtClient):
+    """Test responses with V0"""
+    client.connect(port=DTE, retry_timeout=5, verbose=False)
+    at_response = client.send_command('AT+GMI')
+    assert at_response.ok
+    assert isinstance(at_response.info, str) and len(at_response.info) > 0
+    client.disconnect()
+
+
 def test_send_command_crc(bridge, simulator, cclient: AtClient):
+    cclient.crc_enable = 'AT%CRC=1'
+    assert cclient.crc_disable == 'AT%CRC=0'
+    assert cclient.crc is False
     at_response = cclient.send_command('AT%CRC=1')
     assert at_response.ok
-    assert at_response.crc_ok
+    assert at_response.crc_ok is True
+    assert cclient.crc is True
     at_response = cclient.send_command('AT%CRC=0')
     assert not at_response.ok
     assert at_response.crc_ok
+    assert cclient.crc is True is True
+    at_response = cclient.send_command('AT%CRC=0*BBEB')
+    assert at_response.ok
+    assert at_response.crc_ok is None
+    assert cclient.crc is False
 
 
 def test_command_prefix(bridge, simulator, cclient: AtClient):
