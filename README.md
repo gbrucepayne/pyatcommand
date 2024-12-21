@@ -49,7 +49,8 @@ An AT commmand, with optional timeout, is submitted by calling `send_command()`:
 * A valid response returns an `AtResponse` object with properties:
     * `ok` (`bool`) Indicating a successful result
     * `info` (`str`) If the response included text. Multiple lines are
-    separated by `\n`ewline.
+    separated by newline ('\n').
+    Any CME/CMS ERROR results will be placed in `info` when `ok` is `False`
     * `crc_ok` (`bool` or `None`) If CRC feature is supported, indicates if
     the response had a valid CRC.
 
@@ -83,9 +84,11 @@ the enabler, or manually set using the `crc_disable` property.
 
 ### Lecacy Client
 
-#### Legacy Command/Response support
+The original version of this library operated as follows and is supported.
+This approach can also be used to retrieve *full raw* responses including all
+formatting characters.
 
-The original version of this library operated as follows and is supported:
+#### Legacy Command/Response support
 
 1. AT commmand, with optional timeout, is submitted by a function call
 `send_at_command()` which:
@@ -118,6 +121,10 @@ The original version of this library operated as follows and is supported:
 with an optional `prefix` to remove.
 All other leading/trailing whitespace is removed, and multi-line responses are
 separated by a single line feed (`\n`). Retrieval clears the *get* buffer.
+
+    >[!NOTE]
+    >Optional parameter `clean = False` will return the full raw response with
+    all formatting characters.
 
 4. A function `last_error_code()` is intended to be defined for modems
 that support this concept (e.g. query `S80?` on Orbcomm satellite modem).
