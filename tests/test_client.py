@@ -344,3 +344,19 @@ def test_thread_safety(mock_serial):
     for i in range(thread_count):
         assert results[i].ok, f'Thread {i} failed or got unexpected response: {vars(results[i])}'
     interface.disconnect()
+
+
+def test_cme_error(bridge, simulator: ModemSimulator, cclient: AtClient):
+    at_response = cclient.send_command('AT+CMEE=4')
+    assert at_response.ok is False
+    assert at_response.info == 'invalid configuration'
+
+
+def test_legacy_cme_error(bridge, simulator: ModemSimulator, cclient: AtClient):
+    assert cclient.send_at_command('AT+CMEE=4') == AtErrorCode.ERROR
+    assert cclient.is_response_ready() is True
+    res = cclient.get_response()
+    assert res == 'invalid configuration'
+    cclient.send_at_command('AT+CMEE=4')
+    raw = cclient.get_response(clean=False)
+    assert raw == '\r\n+CME ERROR: invalid configuration\r\n'

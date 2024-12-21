@@ -434,10 +434,7 @@ class AtClient:
             finally:
                 self._cmd_pending = ''
     
-    def _get_at_response(self,
-                         response: str,
-                         prefix: str = '',
-                         queried: bool = False) -> AtResponse:
+    def _get_at_response(self, response: str, prefix: str = '') -> AtResponse:
         """Convert a raw response to `AtResponse`"""
         at_response = AtResponse()
         parts = [x for x in response.strip().split(self.trailer_info) if x]
@@ -454,6 +451,9 @@ class AtClient:
             if result in ['OK', '0']:
                 at_response.result = AtErrorCode.OK
             else:
+                if result.startswith(('+CME', '+CMS')):
+                    prefix, info = result.split('ERROR:')
+                    at_response.info = info.strip()
                 at_response.result = AtErrorCode.ERROR
         if (self._cmd_pending or self._lcmd_pending) and len(parts) > 0:
             if prefix and parts[0].startswith(prefix):
@@ -703,7 +703,7 @@ class AtClient:
                 self._rx_buffer = response
                 at_response = self._get_at_response(response)
                 self._cmd_error = at_response.result
-                self._res_ready = at_response.ok
+                self._res_ready = len(at_response.info) > 0
                 self.ready.set()   # re-enable reading
         return self._cmd_error
     
