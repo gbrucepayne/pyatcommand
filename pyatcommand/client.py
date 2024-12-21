@@ -575,7 +575,7 @@ class AtClient:
                 self._response_queue.put(buf)
             else:
                 if process_urcs(buf):
-                    _log.warning('Residual buffer data: %s', buf)
+                    _log.warning('Residual buffer data: %s', dprint(buf))
             if self._serial.in_waiting > 0:
                 _log.debug('More RX data to process')
             else:
