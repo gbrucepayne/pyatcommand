@@ -2,6 +2,8 @@
 name = "pyatcommand"
 version = "0.3.5"
 description = "An interface for V.25 Hayes AT commands"
+readme = "README.md"
+repository = "https://github.com/gbrucepayne/pyatcommand"
 authors = ["gbrucepayne <gbrucepayne@hotmail.com>"]
 license = "MIT"
 
