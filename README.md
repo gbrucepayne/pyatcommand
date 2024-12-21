@@ -3,7 +3,7 @@
 This was developed due to seeming lack of a generalized AT command processing
 library in the PyPI ecosystem. Several other implementations exist for more
 specific purposes but miss certain functions such as non-verbose (`V0`) mode,
-echo on/off, or unsolicited result codes.
+echo on/off (`E1`), or unsolicited result codes.
 
 ## Client
 
@@ -14,9 +14,78 @@ Allows for processing of command/response or receipt of unsolicited result code
 (URC) emitted by the modem. Also includes an optional CRC validation supported
 by some modems.
 
+### Connection and Initialization
+
+The `AtClient` instance can be configured with settings using initialization
+parameters or when using the `connect()` method. Typical parameters include:
+* The serial `port` name
+* `baudrate` (default `9600`)
+* `echo` (default `True`)
+* `verbose` (default `True`)
+* `autobaud` (default `True`) will cycle through supported baudrates trying to
+attach using a validated `AT` command
+
+Once the basic AT command returns a valid response, the background listening
+thread is started and the device gets initialized to a known AT configuration
+for `echo` and `verbose`.
+
 ### Command/Response
 
 This is the main mode of intended use. The logic flow is as follows:
+
+An AT commmand, with optional timeout, is submitted by calling `send_command()`:
+* Uses a `threading.Lock` to ensure thread safety;
+* Clears the last error code;
+* Clears the response buffer;
+* (Optional) calculates and applies CRC to the command;
+* Applies the command line termination character (default `\r`);
+* Sends the command on serial and waits for all data to be sent;
+* Sets the pending command state;
+* Waits for a response or timeout;
+* If no timeout is specified, the default is 0.3 seconds (`AT_TIMEOUT`).
+    * A default timeout can be set with `AT_TIMEOUT` environment variable
+    or by using the `command_timeout` init parameter or property.
+* A timed-out response returns `None`;
+* A valid response returns an `AtResponse` object with properties:
+    * `ok` (`bool`) Indicating a successful result
+    * `info` (`str`) If the response included text. Multiple lines are
+    separated by `\n`ewline.
+    * `crc_ok` (`bool` or `None`) If CRC feature is supported, indicates if
+    the response had a valid CRC.
+
+### Unsolicited Response Codes (URC)
+
+Once the connection is established and the AT command parameters configured,
+a background thread is started to listen for any incoming serial data.
+Check for unsolicited data using `get_urc()` which returns the next queued URC.
+
+URCs are assumed to always be prefixed and suffixed by `<cr><lf>` regardless
+of the Verbose setting. URCs are also assumed to be a single line
+i.e. no `<cr><lf>` in the middle of a URC.
+
+Race conditions can occur when a URC arrives just as a command is being sent
+resulting in the possibility of the URC(s) being prepended to the response.
+To avoid such conditions you can ensure Echo is enabled so that responses can
+be distinguished from unsolicited by the presence of an echo.
+
+### CRC Error Detection
+
+An optional CRC-16-CCITT feature is supported that appends a 16-bit error
+detection mechanism when supported by the device. A `crc_sep` separator
+can be defined (default `*`) that is followed by a 4-character hexadecimal
+value. The CRC is applied before the command terminator
+(e.g. `AT*3983\r`) or after the result code (e.g. `\r\nOK\r\n*86C5\r\n`).
+
+The command string must be specified in the property `crc_enable`
+e.g. `client.crc_enable = 'AT%CRC=1'`.
+The corresponding disable string can either be derived as the numeric zero of
+the enabler, or manually set using the `crc_disable` property.
+
+### Lecacy Client
+
+#### Legacy Command/Response support
+
+The original version of this library operated as follows and is supported:
 
 1. AT commmand, with optional timeout, is submitted by a function call
 `send_at_command()` which:
@@ -53,7 +122,7 @@ separated by a single line feed (`\n`). Retrieval clears the *get* buffer.
 4. A function `last_error_code()` is intended to be defined for modems
 that support this concept (e.g. query `S80?` on Orbcomm satellite modem).
 
-### Unsolicited Result Codes (URC)
+#### Legacy Unsolicited Result Codes (URC)
 
 Some modems emit unsolicited codes. In these cases it is recommended that the
 application checks/retrieves any URC(s) prior to submitting any AT command.
