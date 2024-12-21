@@ -212,6 +212,22 @@ def test_legacy_then_urc(bridge, simulator: ModemSimulator, cclient: AtClient):
     assert cclient.send_at_command('AT+GMI', timeout=3) == AtErrorCode.OK
     response = cclient.get_response()
     assert response == 'Simulated Modems Inc'
+    # send command without information response
+    assert cclient.send_at_command('ATZ') == AtErrorCode.OK
+    assert cclient.is_response_ready() == False
+    simulator.inject_urc(urc)
+    received = False
+    start_time = time.time()
+    while not received and time.time() - start_time < 10:
+        received = cclient.check_urc()
+        if not received:
+            time.sleep(0.1)
+    if received:
+        logger.info('URC latency %0.1f seconds', time.time() - start_time)
+    assert received is True
+    assert cclient.is_response_ready() is True
+    assert cclient.get_response() == urc
+    
 
 
 def test_send_command(bridge, simulator, cclient: AtClient):

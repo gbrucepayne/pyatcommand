@@ -704,6 +704,8 @@ class AtClient:
                 at_response = self._get_at_response(response)
                 self._cmd_error = at_response.result
                 self._res_ready = len(at_response.info) > 0
+                if not self._res_ready:
+                    self._lcmd_pending = ''
                 self.ready.set()   # re-enable reading
         return self._cmd_error
     
