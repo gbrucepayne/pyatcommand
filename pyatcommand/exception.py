@@ -9,16 +9,16 @@ class AtTimeout(AtException):
     """Indicates a timeout waiting for response."""
 
 
-class AtGnssTimeout(AtException):
-    """Indicates a timeout waiting for a GNSS fix."""
+class AtCrcConfigError(AtException):
+    """Indicates a CRC response was received when none expected or vice versa."""
 
 
 class AtCrcError(AtException):
     """Indicates a detected CRC mismatch on a response."""
 
 
-class AtCrcConfigError(AtException):
-    """Indicates a CRC response was received when none expected or vice versa."""
+class AtDecodeError(AtException):
+    """Indicates non-ASCII or non-printable byte received."""
 
 
 class AtUnsolicited(AtException):
