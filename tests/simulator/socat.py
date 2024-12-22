@@ -172,6 +172,7 @@ class ModemSimulator:
                         self.verbose = self._request.endswith('1')
                         response = VRES_OK if self.verbose else RES_OK
                     elif self.commands and self._request in self.commands:
+                        _log.debug('Processing custom response')
                         res_meta = self.commands[self._request]
                         if isinstance(res_meta, str):
                             response = res_meta
@@ -182,6 +183,8 @@ class ModemSimulator:
                                 time.sleep(res_meta['delay'])
                     elif self._request in self.default_ok:
                         response = VRES_OK if self.verbose else RES_OK
+                    elif 'BAD_BYTE' in self._request:
+                        self._ser.write(bytes([255]))
                     else:
                         _log.error('Unsupported command: %s', self._request)
                         response = VRES_ERR if self.verbose else RES_ERR
@@ -190,7 +193,8 @@ class ModemSimulator:
                             pattern = r'\r\n.*?\r\n'
                             lines = re.findall(pattern, response, re.DOTALL)
                             lines[-1] = lines[-1].strip() + '\r'
-                        _log.debug('Sending response: %s', _debugf(response))
+                        _log.debug('Sending %s response: %s',
+                                   _debugf(self._request), _debugf(response))
                         self._ser.write(response.encode())
                     self._request = ''
                 except (UnicodeDecodeError, UnprintableException):
