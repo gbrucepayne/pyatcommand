@@ -12,6 +12,7 @@ import serial
 from dotenv import load_dotenv
 
 from .constants import AT_TIMEOUT, AtErrorCode, AtParsing
+from .exception import AtCrcConfigError, AtDecodeError, AtTimeout
 from .utils import AtConfig, dprint, printable_char, vlog
 from .crcxmodem import validate_crc, apply_crc
 
@@ -58,7 +59,8 @@ class AtClient:
         self._unsolicited_queue = Queue()
         self._stop_event = threading.Event()
         self._listener_thread: threading.Thread = None
-        self._ignore_unprintable = True
+        self._wait_no_rx_data: float = 0.1
+        self._exception_queue = Queue()
         self._crc_enable: str = ''
         self._crc_disable: str = ''
         self.auto_crc: bool = kwargs.get('auto_crc', False)
@@ -216,7 +218,7 @@ class AtClient:
             
         Raises:
             `ConnectionError` if unable to connect.
-            
+            `ValueError` for invalid parameter settings.
         """
         port = kwargs.pop('port', os.getenv('SERIAL_PORT', '/dev/ttyUSB0'))
         autobaud = kwargs.pop('autobaud', True)
@@ -314,11 +316,12 @@ class AtClient:
             True if successful.
         
         Raises:
-            IOError if serial port is not enabled.
-            ValueError if CRC is not `None` but `crc_enable` is undefined.
+            `ConnectionError` if serial port not enabled or no DCE response.
+            `ValueError` if CRC is not `None` but `crc_enable` is undefined.
+            `AtCrcConfigError` if CRC detected but not configured.
         """
         if not self._serial:
-            raise IOError('Serial port not configured')
+            raise ConnectionError('Serial port not configured')
         if crc is not None and not self.crc_enable:
             raise ValueError('CRC command undefined')
         try:
@@ -326,10 +329,10 @@ class AtClient:
             # derive base config from basic AT response
             res_at: AtResponse = self.send_command('AT')
             if res_at is None:
-                raise IOError('DCE not responding - check connection')
+                raise ConnectionError('DCE not responding - check connection')
             if res_at.crc_ok is not None:
                 if not self.crc_enable:
-                    raise IOError('CRC error with no CRC command defined')
+                    raise AtCrcConfigError('CRC error but no CRC command defined')
                 self._update_config('crc', True)
             # first deal with CRC if supported
             if self.crc_enable:
@@ -388,6 +391,11 @@ class AtClient:
             timeout (float): The time in seconds to wait for a response.
             prefix (str): The prefix to remove.
             **raw (bool): Return the full raw response with formatting if set.
+        
+        Raises:
+            `ValueError` if command is not a valid string or timeout is invalid.
+            `ConnectionError` if the receive buffer is blocked.
+            `AtTimeout` if no response received within timeout.
         """
         if not isinstance(command, str) or not command:
             raise ValueError('Invalid command')
@@ -403,7 +411,9 @@ class AtClient:
             start_time = time.time()
             self._rx_ready.wait(timeout)
             if time.time() - start_time > timeout:
-                raise IOError('Rx wait timed out after %0.1fs', timeout)
+                err_msg = f'RX ready timed out after {timeout} seconds'
+                _log.warning(err_msg)
+                # raise ConnectionError(err_msg)
             while not self._response_queue.empty():
                 dequeued = self._response_queue.get_nowait()
                 _log.warning('Dumped response: %s', dprint(dequeued))
@@ -420,17 +430,24 @@ class AtClient:
                 print(f'{AT_RAW_TX_TAG}{dprint(self._cmd_pending)}')
             self._serial.write(f'{self._cmd_pending}'.encode())
             self._serial.flush()
-            if timeout is None:
-                return None
             try:
-                response: str = self._response_queue.get(timeout=timeout)
-                _log.debug('Response to %s: %s', command, dprint(response))
-                if raw:
-                    return response
-                return self._get_at_response(response, prefix)
-            except Empty:
-                _log.warning('Command response timeout for: %s', command)
-                return None
+                if timeout is None:
+                    return None
+                try:
+                    response: str = self._response_queue.get(timeout=timeout)
+                    if response is None:
+                        exc = self._exception_queue.get_nowait()
+                        if exc:
+                            raise exc
+                    _log.debug('Response to %s: %s',
+                                command, dprint(response))
+                    if raw:
+                        return response
+                    return self._get_at_response(response, prefix)
+                except Empty:
+                    err_msg = f'Command timed out: {command} ({timeout} s)'
+                    _log.warning(err_msg)
+                    raise AtTimeout(err_msg)
             finally:
                 self._cmd_pending = ''
     
@@ -485,7 +502,7 @@ class AtClient:
             str: The ASCII character
         
         Raises:
-            `UnicodeDecodeError` if not printable.
+            `AtDecodeError` if not printable.
         """
         if size is not None and not isinstance(size, int):
             raise ValueError('Invalid size')
@@ -496,9 +513,10 @@ class AtClient:
             data = self._serial.read(size)
             if vlog(VLOG_TAG + 'dev'):
                 _log.debug('Read %d-byte chunk', len(data))
-            if any(not printable_char(c, self._is_debugging_raw) for c in data):
-                raise UnicodeDecodeError('ascii', data, 0, len(data),
-                                         'Unprintable character')
+            for i, c in enumerate(data):
+                if not printable_char(c, self._is_debugging_raw):
+                    err_msg = f'Unprintable byte {hex(c)}'
+                    raise AtDecodeError(err_msg)
             chunk = data.decode('ascii')
         return chunk
     
@@ -508,6 +526,9 @@ class AtClient:
         Args:
             prop_name (str): The configuration property e.g. `echo`.
             detected (bool): The value detected during parsing.
+        
+        Raises:
+            `ValueError` if prop_name not recognized.
         """
         if not hasattr(self._config, prop_name):
             raise ValueError('Invalid prop_name %s', prop_name)
@@ -553,11 +574,19 @@ class AtClient:
             return self._cmd_pending and self._cmd_pending in buf
         
         def remove_echo(buf: str) -> str:
-            if self._cmd_pending and buf.startswith(self._cmd_pending):
+            if self._cmd_pending and self._cmd_pending in buf:
+                if not buf.startswith(self._cmd_pending):
+                    pre_echo = buf.split(self._cmd_pending)[0]
+                    _log.warning('Found pre-echo data: %s', dprint(pre_echo))
+                    buf = buf.replace(pre_echo, '', 1)
+                    residual = process_urcs(pre_echo)
+                    if residual:
+                        _log.warning('Dumped residual data: %s', dprint(residual))
                 self._update_config('echo', True)
                 buf = buf.replace(self._cmd_pending, '', 1)
                 if vlog(VLOG_TAG):
-                    _log.debug('Removed echo from buffer: %s', dprint(buf))
+                    _log.debug('Removed echo from buffer (%s)',
+                               dprint(self._cmd_pending))
             return buf
         
         def process_urcs(buf: str) -> str:
@@ -565,8 +594,11 @@ class AtClient:
             urcs = re.findall(pattern, buf, re.DOTALL)
             for urc in urcs:
                 buf = buf.replace(urc, '', 1)
-                self._unsolicited_queue.put(urc)
-                _log.debug('Processed URC: %s', dprint(urc))
+                if is_response(urc):
+                    _log.warning('Discarding orphan response: %s', dprint(urc))
+                else:
+                    self._unsolicited_queue.put(urc)
+                    _log.debug('Processed URC: %s', dprint(urc))
             return buf
             
         def complete_parsing(buf: str) -> str:
@@ -667,13 +699,20 @@ class AtClient:
                                 else:
                                     buffer = complete_parsing(buffer)
                                     continue
-            except UnicodeDecodeError as err:
-                _log.warning(err)
-                raise
-            except serial.SerialException as err:
-                _log.error('Serial exception: %s', err)
-                raise
-            time.sleep(0.01)   # Prevent CPU overuse
+            except (AtDecodeError, serial.SerialException) as err:
+                buffer = ''
+                _log.error('%s: %s', err.__class__.__name__, str(err))
+                self._exception_queue.put(err)
+                if self._cmd_pending:
+                    self._response_queue.put(None)
+                if isinstance(err, serial.SerialException):
+                    self._stop_event.set()
+            time.sleep(self._wait_no_rx_data)   # Prevent CPU overuse
+            if not self._rx_ready.is_set():
+                if vlog(VLOG_TAG):
+                    _log.warning('Set RX ready after no data for %0.2fs',
+                                 self._wait_no_rx_data)
+                    self._rx_ready.set()
 
     # Legacy interface below
     

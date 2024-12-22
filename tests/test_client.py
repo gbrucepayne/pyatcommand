@@ -9,7 +9,7 @@ from unittest.mock import Mock, patch
 
 from serial.tools.list_ports import comports
 
-from pyatcommand import AtClient, AtErrorCode
+from pyatcommand import AtClient, AtErrorCode, AtTimeout, AtCrcConfigError, AtDecodeError
 from .simulator.socat import SerialBridge, ModemSimulator, DTE, COMMAND_FILE
 
 logger = logging.getLogger(__name__)
@@ -376,3 +376,18 @@ def test_legacy_cme_error(bridge, simulator: ModemSimulator, cclient: AtClient):
     cclient.send_at_command('AT+CMEE=4')
     raw = cclient.get_response(clean=False)
     assert raw == '\r\n+CME ERROR: invalid configuration\r\n'
+
+
+def test_timeout(bridge, simulator, cclient: AtClient):
+    timeout = 1
+    start_time = time.time()
+    with pytest.raises(AtTimeout):
+        cclient.send_command('AT!TIMEOUT?', timeout=timeout)
+    assert int(time.time() - start_time) == timeout
+    at_response = cclient.send_command('AT', timeout=3)
+    assert at_response.ok
+
+
+def test_bad_byte(bridge, simulator, cclient: AtClient):
+    with pytest.raises(AtDecodeError):
+        cclient.send_command('AT!BAD_BYTE?', timeout=2)
