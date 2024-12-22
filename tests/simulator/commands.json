@@ -13,5 +13,6 @@
     "AT+CMEE=3": {"response": "\r\n+CME ERROR: 123\r\n", "delay": 0},
     "AT+CMEE=4": {"response": "\r\n+CME ERROR: invalid configuration\r\n", "delay": 0},
     "AT+CGDCONT?": {"response": "\r\n+CGDCONT: 0,0\r\n\r\nOK\r\n", "delay": 0},
-    "AT+GDELAY?": {"response": "\r\n+GDELAY: \"true\"\r\n\r\nOK\r\n", "delay": 2}
+    "AT+GDELAY?": {"response": "\r\n+GDELAY: \"true\"\r\n\r\nOK\r\n", "delay": 2},
+    "AT!TIMEOUT?": {"response": "\r\nOK\r\n", "delay": 3}
 }
