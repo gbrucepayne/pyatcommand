@@ -80,6 +80,7 @@ class SerialSocketServer:
             while self.running:
                 data = client_socket.recv(1024)
                 if not data:
+                    _log.info('Client terminated connection')
                     break
                 _log.debug('Socket->Serial: %s', data.decode(errors='ignore'))
                 self.serial.write(data)
