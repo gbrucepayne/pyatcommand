@@ -4,6 +4,7 @@ Runs on a remote computer e.g. Raspberry Pi physically connected to a
 modem that interfaces using AT commands.
 """
 
+import argparse
 import logging
 import os
 import serial
@@ -103,7 +104,15 @@ class SerialSocketServer:
 
 if __name__ == '__main__':
     logging.basicConfig(level=logging.DEBUG)
-    server = SerialSocketServer()
+    parser = argparse.ArgumentParser(description="Serial to Socket Server")
+    parser.add_argument("--serial", default="/dev/ttyUSB0", help="Serial port to use (default: /dev/ttyUSB0)")
+    parser.add_argument("--baudrate", type=int, default=9600, help="Baud rate for the serial port (default: 9600)")
+    parser.add_argument("--host", default="0.0.0.0", help="Host to bind the socket server (default: 0.0.0.0)")
+    parser.add_argument("--port", type=int, default=12345, help="Port to bind the socket server (default: 12345)")
+
+    args = parser.parse_args()
+
+    server = SerialSocketServer(args.serial, args.baudrate, args.host, args.port)
     try:
         server.start()
     except KeyboardInterrupt:
