@@ -47,10 +47,8 @@ class SerialSocketServer:
             self.server_socket.bind((self.host, self.port))
             self.server_socket.listen(1)
             _log.info('Socket server listening on %s:%d', self.host, self.port)
-
             self.running = True
             while self.running:
-                _log.info('Waiting for a client to connect...')
                 client_socket, client_address = self.server_socket.accept()
                 _log.info('Client connected from %s', client_address)
 
@@ -82,7 +80,6 @@ class SerialSocketServer:
                 if not data:
                     _log.info('Client terminated connection')
                     break
-                _log.debug('Socket->Serial: %s', data.decode(errors='ignore'))
                 self.serial.write(data)
         except Exception as e:
             _log.error('Socket to serial error: %s', e)
@@ -95,7 +92,6 @@ class SerialSocketServer:
             while self.running:
                 data = self.serial.read(self.serial.in_waiting or 1)
                 if data:
-                    _log.debug('Serial->Socket: %s', data.decode(errors='ignore'))
                     client_socket.sendall(data)
         except Exception as e:
             _log.error('Serial to socket error: %s', e)
