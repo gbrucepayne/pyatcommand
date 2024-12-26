@@ -2,6 +2,7 @@
 """
 from .client import AtClient
 from .constants import AtErrorCode
+from .exception import AtException, AtCrcConfigError, AtDecodeError, AtTimeout
 from .remote import RemoteSerial
 from .exception import AtException, AtCrcConfigError, AtDecodeError, AtTimeout
 from .server import AtCommand, AtServer
