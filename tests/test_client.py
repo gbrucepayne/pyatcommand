@@ -20,7 +20,7 @@ REAL_UART = os.getenv('REAL_UART', '/dev/ttyUSB0')
 @pytest.fixture
 def log_verbose():
     """Configure environment-based logging"""
-    os.environ['LOG_VERBOSE'] = 'atclient'
+    os.environ['LOG_VERBOSE'] = 'atclientdev'
     # os.environ['AT_RAW'] = 'true'
 
 
@@ -256,7 +256,7 @@ def test_send_command_crc(bridge, simulator, cclient: AtClient):
     at_response = cclient.send_command('AT%CRC=0')
     assert not at_response.ok
     assert at_response.crc_ok
-    assert cclient.crc is True is True
+    assert cclient.crc is True
     at_response = cclient.send_command('AT%CRC=0*BBEB')
     assert at_response.ok
     assert at_response.crc_ok is None
@@ -391,3 +391,14 @@ def test_timeout(bridge, simulator, cclient: AtClient):
 def test_bad_byte(bridge, simulator, cclient: AtClient):
     with pytest.raises(AtDecodeError):
         cclient.send_command('AT!BAD_BYTE?', timeout=2)
+
+
+def test_response_plus_urc(bridge, simulator, cclient: AtClient):
+    """What happens when one or more URCs immediately follow a response."""
+    cmd_res = cclient.send_command('AT!MUDDLE?', timeout=5)
+    assert cmd_res.ok is True
+    urc_found = False
+    while not urc_found:
+        time.sleep(0.1)
+        urc_found = cclient.check_urc()
+    assert urc_found is True

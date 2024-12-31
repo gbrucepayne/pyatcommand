@@ -511,7 +511,7 @@ class AtClient:
             if size is None:
                 size = self._serial.in_waiting
             data = self._serial.read(size)
-            if vlog(VLOG_TAG + 'dev'):
+            if vlog(VLOG_TAG + 'dev') and size > 1:
                 _log.debug('Read %d-byte chunk', len(data))
             for i, c in enumerate(data):
                 if not printable_char(c, self._is_debugging_raw):
@@ -548,16 +548,19 @@ class AtClient:
     def _listen(self):
         """Background thread to listen for responses/unsolicited."""
         
-        def is_response(line: str, verbose: bool = True) -> bool:
-            lines = [l.strip() for l in line.split('\n') if l.strip()]
+        def is_response(buf: str, verbose: bool = True) -> bool:
+            lines = [l.strip() for l in buf.split(self._config.cr) if l.strip()]
             if len(lines) == 0:
                 return False
-            last_word = lines[-1]
+            last = lines[-1]
+            if vlog(VLOG_TAG + 'dev'):
+                _log.debug('Assess %s as %s response',
+                           last, 'V1' if verbose else 'V0')
             responses_V0 = ['0', '4']
             responses_V1 = ['OK', 'ERROR', '+CME ERROR', '+CMS ERROR']
-            if verbose:
-                return any(last_word.startswith(v1) for v1 in responses_V1)
-            return any(last_word == v0 for v0 in responses_V0)
+            if not verbose:
+                return any(last == res for res in responses_V0)
+            return any(last.startswith(res) for res in responses_V1)
         
         def is_cmd_crc_enable() -> bool:
             return (self.crc_enable and
@@ -567,7 +570,8 @@ class AtClient:
             return (self.crc_disable and
                     self.command_pending.startswith(self.crc_disable))
             
-        def is_crc(line: str) -> bool:
+        def is_crc(buffer: str) -> bool:
+            line = buffer.strip()
             return len(line) > 4 and line[-5] == self._config.crc_sep
             
         def has_echo(buf: str) -> bool:
@@ -601,13 +605,13 @@ class AtClient:
                     _log.debug('Processed URC: %s', dprint(urc))
             return buf
             
-        def complete_parsing(buf: str) -> str:
+        def complete_parsing(line: str) -> str:
             self._toggle_raw(False)
             if self._cmd_pending:
-                self._response_queue.put(buf)
+                self._response_queue.put(line)
             else:
-                if process_urcs(buf):
-                    _log.warning('Residual buffer data: %s', dprint(buf))
+                if process_urcs(line):
+                    _log.warning('Residual buffer data: %s', dprint(line))
             if self._serial.in_waiting > 0:
                 _log.debug('More RX data to process')
             else:
@@ -634,21 +638,22 @@ class AtClient:
                         chunk = peeked
                         peeked = ''
                     else:
-                        chunk = self._read_chunk()
+                        chunk = self._read_chunk(1)
                     if not chunk:
                         continue
                     if self._res_parsing == AtParsing.NONE:
                         self._res_parsing = AtParsing.RESPONSE
                     buffer += chunk
-                    line = buffer.strip()
-                    if not line:
-                        continue
+                    if not buffer.strip():
+                        continue   # keep reading data
                     last_char = buffer[-1]
                     if last_char == self._config.lf:
                         if vlog(VLOG_TAG + 'dev'):
                             self._toggle_raw(False)
                             _log.debug('Assessing LF: %s', dprint(buffer))
-                        if is_response(line):
+                        if is_response(buffer):
+                            if vlog(VLOG_TAG + 'dev'):
+                                _log.debug('Found V1 response')
                             self._update_config('verbose', True)
                             if has_echo(buffer):
                                 self._update_config('echo', True)
@@ -656,18 +661,22 @@ class AtClient:
                             if is_cmd_crc_enable() and 'OK' in buffer:
                                 self._update_config('crc', True)
                             if self.crc:
-                                if not is_cmd_crc_disable():
+                                if (not is_cmd_crc_disable() or
+                                    (is_cmd_crc_disable() and 'OK' not in buffer)):
+                                    if vlog(VLOG_TAG + 'dev'):
+                                        _log.debug('Continue reading for CRC')
+                                    self._res_parsing = AtParsing.CRC
                                     continue   # keep processing for CRC
-                                if 'OK' in buffer:
+                                if is_cmd_crc_disable() and 'OK' in buffer:
                                     self._update_config('crc', False)
-                            else:
+                            else:   # check if CRC is configured but unknown
                                 peeked = self._read_chunk(1)
                                 if peeked == self._config.crc_sep:
                                     self._update_config('crc', True)
                                     self._res_parsing = AtParsing.CRC
                                     continue
                             buffer = complete_parsing(buffer)
-                        elif is_crc(line):
+                        elif is_crc(buffer):
                             self._update_config('crc', True)
                             if has_echo(buffer):
                                 self._update_config('echo', True)
@@ -689,7 +698,9 @@ class AtClient:
                             self._update_config('echo', True)
                             buffer = remove_echo(buffer)
                             self._res_parsing = AtParsing.RESPONSE
-                        if is_response(buffer, verbose=False): # check for V0
+                        elif is_response(buffer, verbose=False): # check for V0
+                            if vlog(VLOG_TAG + 'dev'):
+                                _log.debug('Found V0 response')
                             peeked = self._read_chunk(1)
                             if peeked != self._config.lf:   # V0 confirmed
                                 self._update_config('verbose', False)
