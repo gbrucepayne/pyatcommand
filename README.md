@@ -1,18 +1,35 @@
-# V.25 AT Command Parser for Python
+# ITU-T V.250 AT Command Parser for Python
 
 This was developed due to seeming lack of a generalized AT command processing
 library in the PyPI ecosystem. Several other implementations exist for more
 specific purposes but miss certain functions such as non-verbose (`V0`) mode,
-echo on/off (`E1`), or unsolicited result codes.
+echo on/off (`E1`), or unsolicited result codes (URC) and related complexities
+involving solicited/unsolicited race conditions.
+
+Data Terminating Equipment **DTE** refers to the device talking to the modem
+i.e. originating commands and would implement the **`AtClient`**.
+
+Data Communications Equipment **DCE** refers to the modem responding to commands
+or emitting unsolicited information and would implement the **`AtServer`**.
+
+Use of Verbose mode (`ATV1`) is generally recommended to disambiguate responses, errors and URCs.
+
+Use of Echo (`ATE1`) is generally recommended to disambiguate responses from
+URCs.
+
+Although the standard allows changing the `<cr>` and `<lf>` characters, this
+is rarely practical in modern systems, and is generally discouraged.
 
 ## Client
 
 The client functionality is used to talk to a modem (or anything similar that
-supports AT commands).
+supports ITU-T V.250 style AT commands).
 
 Allows for processing of command/response or receipt of unsolicited result code
-(URC) emitted by the modem. Also includes an optional CRC validation supported
-by some modems.
+(URC) emitted by the modem. Also includes an optional 16-cit CRC validation
+supported by some modems.
+
+Output from the modem 
 
 ### Connection and Initialization
 
