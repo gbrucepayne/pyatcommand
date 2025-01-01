@@ -202,20 +202,29 @@ class ModemSimulator:
                                b[0])
                     self._request = ''
     
-    def inject_urc(self, urc: str):
+    def inject_urc(self, urc: str, v0_header: str = '\r\n'):
         """Inject an unsolicited response code."""
         if not isinstance(urc, str) or not urc:
             _log.error('Invalid URC')
             return
-        urc = f'\r\n{urc}\r\n' if self.verbose else f'{urc}\r\n'
+        if self.verbose:
+            urc = f'\r\n{urc}\r\n'
+        else:
+            urc = f'{v0_header}{urc}\r\n'
         _log.debug('Sending URC: %s', _debugf(urc))
         self._ser.write(urc.encode())
+        self._ser.flush()
     
-    def multi_urc(self, urcs: 'list[str]'):
+    def multi_urc(self, urcs: 'list[str]', v0_header: str = '\r\n'):
         """Inject multiple unsolicited outputs."""
-        chained = '\r\n' + '\r\n\r\n'.join(urc for urc in urcs) + '\r\n'
+        if self.verbose:
+            chained = '\r\n'.join(f'\r\n{urc}' for urc in urcs)
+        else:
+            chained = '\r\n'.join(f'{v0_header}{urc}' for urc in urcs)
+        chained += '\r\n'
         _log.debug('Sending chained URCS: %s', _debugf(chained))
         self._ser.write(chained.encode())
+        self._ser.flush()
     
     def stop(self):
         self._running = False

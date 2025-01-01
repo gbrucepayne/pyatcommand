@@ -308,6 +308,30 @@ def test_multi_urc(bridge, simulator: ModemSimulator, cclient: AtClient):
     assert received_count == len(urcs)
 
 
+def test_multi_urc_v0(bridge, simulator: ModemSimulator, cclient: AtClient):
+    simulator.verbose = False
+    urcs = [
+        '%NOTIFY:"RRCSTATE",2',
+        '%NOTIFY:"RRCSTATE",0',
+        '%NOTIFY:"RRCSTATE",2',
+        '+CEREG: 0,,,,,,,"00111000"',
+    ]
+    # test with default URC header '\r\n'
+    simulator.multi_urc(urcs)
+    received_count = 0
+    while received_count < len(urcs):
+        if cclient.get_urc():
+            received_count += 1
+    assert received_count == len(urcs)
+    # test with no URC header
+    simulator.multi_urc(urcs, '')
+    received_count = 0
+    while received_count < len(urcs):
+        if cclient.get_urc():
+            received_count += 1
+    assert received_count == len(urcs)
+
+
 def test_urc_send_race(bridge, simulator: ModemSimulator, cclient: AtClient):
     """Try to emulate a command being sent while a URC is processing."""
     long_urc = '+LONGURC: ' + 'x' * 25
