@@ -25,7 +25,14 @@ _log = logging.getLogger(__name__)
 
 
 class AtResponse:
-    """"""
+    """A class defining a response to an AT command.
+    
+    Attributes:
+        result (AtErrorCode): The result code.
+        info (str): Information returned or empty string.
+        ok (bool): Flag indicating if the result code was a success.
+        crc_ok (bool): Flag indicating if CRC check passed, if supported.
+    """
     def __init__(self, response: str = '', result: AtErrorCode = None):
         self.info: str = response
         self.result: AtErrorCode = result
@@ -602,6 +609,12 @@ class AtClient:
             for i, line in enumerate(lines):
                 if line == self.trailer_info and i < len(lines) - 1:
                     lines[i + 1] = self.trailer_info + lines[i + 1]
+                elif line.endswith(self.trailer_info) and i < len(lines) - 1:
+                    noncompliant = [r.lstrip() for r in self.res_V1]
+                    if lines[i + 1] in noncompliant:
+                        _log.warning('Fixing non-compliant response: %s',
+                                     dprint(line + lines[i + 1]))
+                        lines[i + 1] = self.header + lines[i + 1]
             return [l for l in lines if l.strip()]
         
         def is_response(buf: str, verbose: bool = True) -> bool:
@@ -611,7 +624,7 @@ class AtClient:
             last = lines[-1]
             if vlog(VLOG_TAG + 'dev'):
                 _log.debug('Assess %s as %s response',
-                           last, 'V1' if verbose else 'V0')
+                           dprint(last), 'V1' if verbose else 'V0')
             if not verbose:
                 return any(last == res for res in self.res_V0)
             return any(last.startswith(res) for res in self.res_V1)

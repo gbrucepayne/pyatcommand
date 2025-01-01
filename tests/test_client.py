@@ -291,6 +291,9 @@ def test_multiline(bridge, simulator: ModemSimulator, cclient: AtClient):
     """Multiline responses"""
     response = cclient.send_command('ATI')
     assert response.ok and len(response.info.split('\n')) > 1
+    single_crlf_spacer_response = response.info.split('\n')
+    response_2 = cclient.send_command('ATI1')
+    assert response_2.info.split('\n') == single_crlf_spacer_response
 
 
 def test_multi_urc(bridge, simulator: ModemSimulator, cclient: AtClient):
@@ -426,3 +429,10 @@ def test_response_plus_urc(bridge, simulator, cclient: AtClient):
         time.sleep(0.1)
         urc_found = cclient.check_urc()
     assert urc_found is True
+
+
+def test_noncompliant_response(bridge, simulator, cclient: AtClient, log_verbose):
+    """Check noncompliant response handling."""
+    at_response = cclient.send_command('AT!NONCOMPLY?')
+    assert at_response.ok is True
+    assert len(at_response.info) > 0
