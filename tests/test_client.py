@@ -436,3 +436,10 @@ def test_noncompliant_response(bridge, simulator, cclient: AtClient, log_verbose
     at_response = cclient.send_command('AT!NONCOMPLY?')
     assert at_response.ok is True
     assert len(at_response.info) > 0
+
+def test_urc_echo_race(bridge, simulator, cclient: AtClient, log_verbose):
+    """Case when URC arrives as AT command is being sent, before echo received."""
+    # disable echo on simulator to create test response
+    simulator.echo = False
+    at_response = cclient.send_command('AT!ECHORACE?')
+    assert at_response.ok is True

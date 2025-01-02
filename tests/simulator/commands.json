@@ -17,5 +17,6 @@
     "AT+GDELAY?": {"response": "\r\n+GDELAY: \"true\"\r\n\r\nOK\r\n", "delay": 2},
     "AT!TIMEOUT?": {"response": "\r\nOK\r\n", "delay": 3},
     "AT!MUDDLE?": {"response": "\r\nOK\r\n\r\n+URC: something\r\n"},
-    "AT!NONCOMPLY?": {"response": "\r\nMissing trailer\r\nOK\r\n"}
+    "AT!NONCOMPLY?": {"response": "\r\nMissing trailer\r\nOK\r\n"},
+    "AT!ECHORACE?": {"response": "\r\n+URC: event data\r\nAT!ECHORACE?\r\r\n!ECHORACE: info\r\n\r\nOK\r\n"}
 }

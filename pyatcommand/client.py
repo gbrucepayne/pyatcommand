@@ -622,12 +622,16 @@ class AtClient:
             if len(lines) == 0:
                 return False
             last = lines[-1]
-            if vlog(VLOG_TAG + 'dev'):
-                _log.debug('Assess %s as %s response',
-                           dprint(last), 'V1' if verbose else 'V0')
             if not verbose:
-                return any(last == res for res in self.res_V0)
-            return any(last.startswith(res) for res in self.res_V1)
+                result = any(last == res for res in self.res_V0)
+            else:
+                result = any(last.startswith(res) for res in self.res_V1)
+            vtype = 'V1' if verbose else 'V0'
+            if result and vlog(VLOG_TAG):
+                _log.debug('Found %s response: %s', vtype, dprint(buf))
+            elif not result and vlog(VLOG_TAG + 'dev'):
+                _log.debug('Not a %s response: %s', vtype, dprint(buf))
+            return result
         
         def is_cmd_crc_enable() -> bool:
             return (self.crc_enable and
@@ -663,14 +667,14 @@ class AtClient:
         def process_urcs(buf: str) -> str:
             urcs = at_splitlines(buf)
             for urc in urcs:
-                buf = buf.replace(urc, '', 1)
-                if not urc.strip():
+                if not urc.strip() or has_echo(urc):
                     continue
                 if is_response(urc):
                     _log.warning('Discarding orphan response: %s', dprint(urc))
                 else:
                     self._unsolicited_queue.put(urc)
                     _log.debug('Processed URC: %s', dprint(urc))
+                buf = buf.replace(urc, '', 1)
             return buf
             
         def complete_parsing(line: str) -> str:
@@ -717,8 +721,6 @@ class AtClient:
                             self._toggle_raw(False)
                             _log.debug('Assessing LF: %s', dprint(buffer))
                         if is_response(buffer):
-                            if vlog(VLOG_TAG + 'dev'):
-                                _log.debug('Found V1 response')
                             self._update_config('verbose', True)
                             if has_echo(buffer):
                                 self._update_config('echo', True)
@@ -756,13 +758,12 @@ class AtClient:
                             _log.debug('Assessing CR: %s', dprint(buffer))
                         if has_echo(buffer):
                             if not buffer.startswith(self.command_pending):
-                                _log.debug('Assessing pre-echo URC race condition')
+                                _log.debug('Assessing pre-echo URC race: %s',
+                                           dprint(buffer))
                                 buffer = process_urcs(buffer)
                             self._update_config('echo', True)
                             buffer = remove_echo(buffer)
                         elif is_response(buffer, verbose=False): # check for V0
-                            if vlog(VLOG_TAG + 'dev'):
-                                _log.debug('Found V0 response')
                             peeked = self._read_chunk(1)
                             if peeked != self._config.lf:   # V0 confirmed
                                 self._update_config('verbose', False)
