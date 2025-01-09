@@ -20,7 +20,7 @@ REAL_UART = os.getenv('REAL_UART', '/dev/ttyUSB0')
 @pytest.fixture
 def log_verbose():
     """Configure environment-based logging"""
-    os.environ['LOG_VERBOSE'] = 'atclient'
+    os.environ['LOG_VERBOSE'] = 'atclientdev'
     # os.environ['AT_RAW'] = 'true'
 
 
@@ -256,7 +256,7 @@ def test_send_command_crc(bridge, simulator, cclient: AtClient):
     at_response = cclient.send_command('AT%CRC=0')
     assert not at_response.ok
     assert at_response.crc_ok
-    assert cclient.crc is True is True
+    assert cclient.crc is True
     at_response = cclient.send_command('AT%CRC=0*BBEB')
     assert at_response.ok
     assert at_response.crc_ok is None
@@ -291,6 +291,9 @@ def test_multiline(bridge, simulator: ModemSimulator, cclient: AtClient):
     """Multiline responses"""
     response = cclient.send_command('ATI')
     assert response.ok and len(response.info.split('\n')) > 1
+    single_crlf_spacer_response = response.info.split('\n')
+    response_2 = cclient.send_command('ATI1')
+    assert response_2.info.split('\n') == single_crlf_spacer_response
 
 
 def test_multi_urc(bridge, simulator: ModemSimulator, cclient: AtClient):
@@ -301,6 +304,30 @@ def test_multi_urc(bridge, simulator: ModemSimulator, cclient: AtClient):
         '+CEREG: 0,,,,,,,"00111000"',
     ]
     simulator.multi_urc(urcs)
+    received_count = 0
+    while received_count < len(urcs):
+        if cclient.get_urc():
+            received_count += 1
+    assert received_count == len(urcs)
+
+
+def test_multi_urc_v0(bridge, simulator: ModemSimulator, cclient: AtClient):
+    simulator.verbose = False
+    urcs = [
+        '%NOTIFY:"RRCSTATE",2',
+        '%NOTIFY:"RRCSTATE",0',
+        '%NOTIFY:"RRCSTATE",2',
+        '+CEREG: 0,,,,,,,"00111000"',
+    ]
+    # test with default URC header '\r\n'
+    simulator.multi_urc(urcs)
+    received_count = 0
+    while received_count < len(urcs):
+        if cclient.get_urc():
+            received_count += 1
+    assert received_count == len(urcs)
+    # test with no URC header
+    simulator.multi_urc(urcs, '')
     received_count = 0
     while received_count < len(urcs):
         if cclient.get_urc():
@@ -391,3 +418,28 @@ def test_timeout(bridge, simulator, cclient: AtClient):
 def test_bad_byte(bridge, simulator, cclient: AtClient):
     with pytest.raises(AtDecodeError):
         cclient.send_command('AT!BAD_BYTE?', timeout=2)
+
+
+def test_response_plus_urc(bridge, simulator, cclient: AtClient):
+    """What happens when one or more URCs immediately follow a response."""
+    cmd_res = cclient.send_command('AT!MUDDLE?', timeout=5)
+    assert cmd_res.ok is True
+    urc_found = False
+    while not urc_found:
+        time.sleep(0.1)
+        urc_found = cclient.check_urc()
+    assert urc_found is True
+
+
+def test_noncompliant_response(bridge, simulator, cclient: AtClient, log_verbose):
+    """Check noncompliant response handling."""
+    at_response = cclient.send_command('AT!NONCOMPLY?')
+    assert at_response.ok is True
+    assert len(at_response.info) > 0
+
+def test_urc_echo_race(bridge, simulator, cclient: AtClient, log_verbose):
+    """Case when URC arrives as AT command is being sent, before echo received."""
+    # disable echo on simulator to create test response
+    simulator.echo = False
+    at_response = cclient.send_command('AT!ECHORACE?')
+    assert at_response.ok is True

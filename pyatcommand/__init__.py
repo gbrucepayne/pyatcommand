@@ -3,7 +3,7 @@
 from .client import AtClient
 from .constants import AtErrorCode
 from .exception import AtException, AtCrcConfigError, AtDecodeError, AtTimeout
-from .remote import RemoteSerial
+from .remote import SerialSocketServer
 from .exception import AtException, AtCrcConfigError, AtDecodeError, AtTimeout
 from .server import AtCommand, AtServer
 from .crcxmodem import apply_crc, validate_crc
@@ -19,5 +19,5 @@ __all__ = [
     AtCommand,
     apply_crc,
     validate_crc,
-    RemoteSerial,
+    SerialSocketServer,
 ]

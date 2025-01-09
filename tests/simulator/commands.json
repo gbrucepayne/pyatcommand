@@ -9,10 +9,14 @@
     "AT+GMI": {"response": "\r\nSimulated Modems Inc\r\n\r\nOK\r\n"},
     "ATI": {"response": "\r\nFirst line\r\nSecond line\r\n\r\nOK\r\n"},
     "ATI0": {"response": "\r\nVendor-specific info\r\n\r\nOK\r\n"},
+    "ATI1": {"response": "\r\nFirst line\r\n\r\nSecond line\r\n\r\nOK\r\n"},
     "ATZ": {"response": "\r\nOK\r\n", "delay": 0},
     "AT+CMEE=3": {"response": "\r\n+CME ERROR: 123\r\n", "delay": 0},
     "AT+CMEE=4": {"response": "\r\n+CME ERROR: invalid configuration\r\n", "delay": 0},
     "AT+CGDCONT?": {"response": "\r\n+CGDCONT: 0,0\r\n\r\nOK\r\n", "delay": 0},
     "AT+GDELAY?": {"response": "\r\n+GDELAY: \"true\"\r\n\r\nOK\r\n", "delay": 2},
-    "AT!TIMEOUT?": {"response": "\r\nOK\r\n", "delay": 3}
+    "AT!TIMEOUT?": {"response": "\r\nOK\r\n", "delay": 3},
+    "AT!MUDDLE?": {"response": "\r\nOK\r\n\r\n+URC: something\r\n"},
+    "AT!NONCOMPLY?": {"response": "\r\nMissing trailer\r\nOK\r\n"},
+    "AT!ECHORACE?": {"response": "\r\n+URC: event data\r\nAT!ECHORACE?\r\r\n!ECHORACE: info\r\n\r\nOK\r\n"}
 }

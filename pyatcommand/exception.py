@@ -23,3 +23,7 @@ class AtDecodeError(AtException):
 
 class AtUnsolicited(AtException):
     """Indicates unsolicited data was received from the modem."""
+
+
+class AtCommandUnknown(AtException):
+    """Indicates an unknown command."""
