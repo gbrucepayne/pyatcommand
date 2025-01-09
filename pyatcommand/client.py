@@ -391,6 +391,7 @@ class AtClient:
             timeout (float): The time in seconds to wait for a response.
             prefix (str): The prefix to remove.
             **raw (bool): Return the full raw response with formatting if set.
+            **rx_ready_wait (float|None): Maximum time to wait for Rx ready
         
         Raises:
             `ValueError` if command is not a valid string or timeout is invalid.
@@ -405,18 +406,22 @@ class AtClient:
         if timeout == AT_TIMEOUT and self._command_timeout != AT_TIMEOUT:
             timeout = self._command_timeout
         raw = kwargs.get('raw', False)
+        rx_ready_wait = kwargs.get('rx_wait_timeout', AT_TIMEOUT)
+        if not isinstance(rx_ready_wait, (float, int)):
+            raise ValueError('Invalid rx_ready_wait')
         with self._lock:
-            if vlog(VLOG_TAG) and not self._rx_ready.is_set():
+            if not self._rx_ready.is_set():
                 _log.debug('Waiting for RX ready')
-            start_time = time.time()
-            self._rx_ready.wait(timeout)
-            if time.time() - start_time > timeout:
-                err_msg = f'RX ready timed out after {timeout} seconds'
-                _log.warning(err_msg)
-                # raise ConnectionError(err_msg)
+                start_time = time.time()
+                self._rx_ready.wait(rx_ready_wait)
+                if time.time() - start_time > rx_ready_wait:
+                    err_msg = f'RX ready timed out after {timeout} seconds'
+                    _log.warning(err_msg)
+                    # raise ConnectionError(err_msg)
+                time.sleep(0.01)   # allow time for previous command to retrieve
             while not self._response_queue.empty():
                 dequeued = self._response_queue.get_nowait()
-                _log.warning('Dumped response: %s', dprint(dequeued))
+                _log.warning('Dumped prior output: %s', dprint(dequeued))
             # self._serial.reset_output_buffer()
             if self.crc and self.auto_crc:
                 command = apply_crc(command)
