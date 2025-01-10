@@ -164,6 +164,20 @@ Currently a CCITT-16-CRC option is supported for commands and responses. The
 enable/disable command may be configured using `+CRC=<1|0>`.
 (`%CRC=<1|0>` also works)
 
+## Debugging
+
+Low-level debugging of serial exchanges is supported by configuring various
+levels:
+
+* Standard `logging` level `DEBUG` will show exchanges in a single line with
+special characters embedded in angle brackets e.g. `<cr>`.
+* Using an environment variable `LOG_VERBOSE` allows for more detailed analysis:
+    * `atclient` reveals additional details about the parsing process/algorithm
+    * `atclientdev` reveals even lower level details
+* Using an environment variable `AT_RAW` set to `1` or `true` will output
+individual characters (specials wrapped in angle brackets) to stdout
+with line headers indicating the direction of transmission (TX/RX)
+
 ## Server (Work in Progress)
 
 The server concept is to act as a modem/proxy replying to a microcontroller.
