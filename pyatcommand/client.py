@@ -6,6 +6,7 @@ import os
 import threading
 import time
 from queue import Queue, Empty
+from warnings import warn
 
 import serial
 from dotenv import load_dotenv
@@ -427,7 +428,8 @@ class AtClient:
         
         Args:
             command (str): The AT command to send.
-            timeout (float): The time in seconds to wait for a response.
+            timeout (float): The maximum time in seconds to wait for a response.
+                `None` returns immediately and any response will be orphaned.
             prefix (str): The prefix to remove.
             **raw (bool): Return the full raw response with formatting if set.
             **rx_ready_wait (float|None): Maximum time to wait for Rx ready
@@ -464,7 +466,8 @@ class AtClient:
             # self._serial.reset_output_buffer()
             if self.crc and self.auto_crc:
                 command = apply_crc(command)
-            self._cmd_pending = command + self.terminator
+            if not command.endswith((self.terminator, self.trailer_info)):
+                self._cmd_pending = command + self.terminator
             _log.debug('Sending command (timeout %0.1f): %s',
                        timeout, dprint(self._cmd_pending))
             if self._debug_raw():
@@ -473,7 +476,8 @@ class AtClient:
             self._serial.flush()
             try:
                 if timeout is None:
-                    return None
+                    _log.warning(f'{command} timeout None may orphan response')
+                    return
                 try:
                     response: str = self._response_queue.get(timeout=timeout)
                     if response is None:
@@ -805,14 +809,17 @@ class AtClient:
         
         Args:
             at_command (str): The command to send
-            timeout (float): The maximum time to wait for a response
+            timeout (float): The maximum time to wait for a response.
         
         Returns:
             `AtErrorCode` indicating success (0) or failure
         """
         response = self.send_command(at_command, timeout, raw=True)
         if not response:
-            self._cmd_error = AtErrorCode.ERR_TIMEOUT
+            if timeout is not None:
+                self._cmd_error = AtErrorCode.ERR_TIMEOUT
+            else:
+                self._cmd_error = AtErrorCode.PENDING
         else:
             with self._lock:
                 self.ready.clear()   # pause reading temporarily
