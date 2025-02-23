@@ -371,7 +371,7 @@ class AtClient:
         if crc is not None and not self.crc_enable:
             raise ValueError('CRC command undefined')
         try:
-            _log.debug('Initializing modem')
+            _log.debug('Initializing AT configuration')
             # first manage CRC if supported
             if self.crc_enable:
                 res_crc = None
@@ -824,8 +824,10 @@ class AtClient:
             with self._lock:
                 self.ready.clear()   # pause reading temporarily
                 self._lcmd_pending = at_command
-                self._rx_buffer = response
                 at_response = self._get_at_response(response)
+                if at_response.info:
+                    recon = at_response.info.replace('\n', '\r\n')
+                    self._rx_buffer = f'\r\n{recon}\r\n'
                 self._cmd_error = at_response.result
                 self._res_ready = len(at_response.info) > 0
                 if not self._res_ready:
@@ -872,7 +874,7 @@ class AtClient:
             if vlog(VLOG_TAG):
                 _log.debug('Removed prefix (%s): %s', dprint(prefix), dprint(res))
         if clean:
-            res = self._get_at_response(res).info
+            res = res.strip().replace('\r\n', '\n')
         self._rx_buffer = ''
         if self._lcmd_pending:
             self._lcmd_pending = ''

@@ -165,6 +165,9 @@ def test_legacy_response(bridge: SerialBridge, simulator: ModemSimulator, cclien
     assert cclient.send_at_command('ATI') == AtErrorCode.OK
     response = cclient.get_response()
     assert response == 'First line\nSecond line'
+    assert cclient.send_at_command('AT') == AtErrorCode.OK
+    response = cclient.get_response()
+    assert response == ''
 
 
 def test_legacy_response_prefix(bridge: SerialBridge, simulator: ModemSimulator, cclient: AtClient):
