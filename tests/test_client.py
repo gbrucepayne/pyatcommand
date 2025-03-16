@@ -397,8 +397,8 @@ def test_cme_error(bridge, simulator: ModemSimulator, cclient: AtClient):
     assert at_response.info == 'invalid configuration'
 
 
-def test_legacy_cme_error(bridge, simulator: ModemSimulator, cclient: AtClient):
-    assert cclient.send_at_command('AT+CMEE=4') == AtErrorCode.ERROR
+def test_legacy_cme_error(bridge, simulator: ModemSimulator, cclient: AtClient, log_verbose):
+    assert cclient.send_at_command('AT+CMEE=4') == AtErrorCode.CME_ERROR
     assert cclient.is_response_ready() is True
     res = cclient.get_response()
     assert res == 'invalid configuration'
