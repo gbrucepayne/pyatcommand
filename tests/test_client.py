@@ -230,7 +230,6 @@ def test_legacy_then_urc(bridge, simulator: ModemSimulator, cclient: AtClient):
     assert received is True
     assert cclient.is_response_ready() is True
     assert cclient.get_response() == urc
-    
 
 
 def test_send_command(bridge, simulator, cclient: AtClient):
@@ -436,9 +435,11 @@ def test_response_plus_urc(bridge, simulator, cclient: AtClient):
 
 def test_noncompliant_response(bridge, simulator, cclient: AtClient, log_verbose):
     """Check noncompliant response handling."""
+    # Seen on Murata/Sony response to AT%GETACFG="ntn.conf.gnss_in_use"
     at_response = cclient.send_command('AT!NONCOMPLY?')
     assert at_response.ok is True
     assert len(at_response.info) > 0
+
 
 def test_urc_echo_race(bridge, simulator, cclient: AtClient, log_verbose):
     """Case when URC arrives as AT command is being sent, before echo received."""
@@ -446,3 +447,16 @@ def test_urc_echo_race(bridge, simulator, cclient: AtClient, log_verbose):
     simulator.echo = False
     at_response = cclient.send_command('AT!ECHORACE?')
     assert at_response.ok is True
+
+
+def test_urc_response_race(bridge, simulator, cclient: AtClient, log_verbose):
+    """Case when URC arrives after command but before response."""
+    # Seen on Murata/Sony with +CEREG output between command and response
+    at_response = cclient.send_command('AT!RESURCRACE?', prefix='!RESURCRACE:')
+    assert at_response.ok is True
+    urc = cclient.get_urc()
+    assert urc is not None
+    assert cclient.send_at_command('AT!RESURCRACE?') == AtErrorCode.OK
+    response = cclient.get_response('!RESURCRACE:')
+    assert len(response) > 0
+    assert cclient.check_urc() is True

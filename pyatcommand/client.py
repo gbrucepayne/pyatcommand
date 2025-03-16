@@ -519,8 +519,17 @@ class AtClient:
                     at_response.info = info.strip()
                 at_response.result = AtErrorCode.ERROR
         if (self._cmd_pending or self._lcmd_pending) and len(parts) > 0:
-            if prefix and parts[0].startswith(prefix):
-                parts[0] = parts[0].replace(prefix, '').strip()
+            if prefix:
+                if (not parts[0].startswith(prefix) and
+                    any(part.startswith(prefix) for part in parts)):
+                    # Unexpected pre-response data
+                    while not parts[0].startswith(prefix):
+                        urc = parts.pop(0)
+                        self._unsolicited_queue.put(urc)
+                        _log.warning('Found pre-response URC: %s', dprint(urc))
+                elif not parts[0].startswith(prefix):
+                    _log.warning('Prefix %s not found', prefix)
+                parts[0] = parts[0].replace(prefix, '', 1).strip()
             at_response.info = '\n'.join(parts)
         return at_response
     
@@ -827,8 +836,8 @@ class AtClient:
                 self._lcmd_pending = at_command
                 at_response = self._get_at_response(response)
                 if at_response.info:
-                    recon = at_response.info.replace('\n', '\r\n')
-                    self._rx_buffer = f'\r\n{recon}\r\n'
+                    reconstruct = at_response.info.replace('\n', '\r\n')
+                    self._rx_buffer = f'\r\n{reconstruct}\r\n'
                 self._cmd_error = at_response.result
                 self._res_ready = len(at_response.info) > 0
                 if not self._res_ready:
@@ -870,10 +879,20 @@ class AtClient:
             Information response or URC from the buffer.
         """
         res = self._rx_buffer
-        if prefix and res.strip().startswith(prefix):
+        if prefix:
+            if not res.strip().startswith(prefix) and prefix in res:
+                lines = [l.strip() for l in res.split(self.trailer_result) if l]
+                while not lines[0].startswith(prefix):
+                    urc = f'{self.header}{lines.pop(0)}{self.trailer_result}'
+                    self._unsolicited_queue.put(urc)
+                    _log.warning('Found pre-response URC: %s', dprint(urc))
+                res = f'{self.header}{(self.trailer_info).join(lines)}{self.trailer_result}'
+            elif not res.strip().startswith(prefix):
+                _log.warning('Prefix %s not found', prefix)
             res = res.replace(prefix, '', 1)
             if vlog(VLOG_TAG):
-                _log.debug('Removed prefix (%s): %s', dprint(prefix), dprint(res))
+                _log.debug('Removed prefix (%s): %s',
+                           dprint(prefix), dprint(res))
         if clean:
             res = res.strip().replace('\r\n', '\n')
         self._rx_buffer = ''
