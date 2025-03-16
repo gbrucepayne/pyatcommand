@@ -466,8 +466,9 @@ class AtClient:
             # self._serial.reset_output_buffer()
             if self.crc and self.auto_crc:
                 command = apply_crc(command)
+            self._cmd_pending = command
             if not command.endswith((self.terminator, self.trailer_info)):
-                self._cmd_pending = command + self.terminator
+                self._cmd_pending += self.terminator
             _log.debug('Sending command (timeout %0.1f): %s',
                        timeout, dprint(self._cmd_pending))
             if self._debug_raw():
