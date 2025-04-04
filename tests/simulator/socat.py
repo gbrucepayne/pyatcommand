@@ -15,6 +15,7 @@ import threading
 import time
 import atexit
 import string
+import re
 
 import serial
 from serial.tools.list_ports import comports
@@ -39,6 +40,7 @@ class UnprintableException(Exception):
 
 
 class SerialBridge:
+    """A `socat` bridge between 2 physical and/or virtual serial ports."""
     def __init__(self, dte: str = DTE, dce: str = DCE, baudrate: int = BAUDRATE) -> None:
         self.dte: str = dte
         self.dce: str = dce
@@ -79,13 +81,17 @@ class SerialBridge:
         time.sleep(SOCAT_SETUP_DELAY_S)
     
     def stop(self):
-        # self._process.kill()
-        os.killpg(os.getpgid(self._process.pid), signal.SIGTERM)
-        if self._stderr:
-            _log.error('%s', self._stderr)
+        try:
+            # self._process.kill()
+            os.killpg(os.getpgid(self._process.pid), signal.SIGTERM)
+            if self._stderr:
+                _log.error('%s', self._stderr)
+        except Exception as err:
+            _log.error('Serial bridge stop: %s', err)
 
 
 class ModemSimulator:
+    """A simulator for an AT command driven modem."""
     def __init__(self) -> None:
         self.echo: bool = True
         self.verbose: bool = True
@@ -95,43 +101,58 @@ class ModemSimulator:
         self._running: bool = False
         self._thread: threading.Thread = None
         self._ser: serial.Serial = None
-        self.baudrate: int = BAUDRATE
+        self._baudrate: int = BAUDRATE
         self._request: str = ''
+    
+    @property
+    def baudrate(self) -> int:
+        return self._baudrate
+    
+    @baudrate.setter
+    def baudrate(self, value: int):
+        if not isinstance(value, int) or value <= 0:
+            raise ValueError('Invalid baudrate')
+        self._baudrate = value
+        if self._ser and self._ser.baudrate != self._baudrate:
+            _log.warning('Changing active serial baudrate to %d', self._baudrate)
+            self._ser.baudrate = self._baudrate
     
     def start(self,
               port: str = DCE,
-              baudrate: int = BAUDRATE,
+              baudrate: int = None,
               command_file: str = None,
               ):
         if self._running:
             return
         self._running = True
+        if isinstance(baudrate, int):
+            self.baudrate = baudrate
         if command_file:
             try:
                 with open(command_file) as f:
                     self.commands = json.load(f)
                 #TODO: validate structure
-                _log.info('Commands: %s', json.dumps(self.commands))
+                _log.info('Using commands: %s', json.dumps(self.commands))
             except Exception as exc:
                 _log.error(exc)
         try:
-            self._ser = serial.Serial(port, baudrate)
+            self._ser = serial.Serial(port, self.baudrate)
             self._thread = threading.Thread(target=self._run,
                                             name='modem_simulator',
                                             daemon=True)
             self._thread.start()
             _log.info('Starting modem simulation on %s at %d baud',
-                      port, baudrate)
+                      port, self.baudrate)
         except Exception as exc:
             _log.error(exc)
     
     def _run(self):
         while self._running:
-            if not self._ser.is_open:
+            if self._ser and not self._ser.is_open:
                 self.stop()
                 _log.error('DTE not connected')
                 return
-            if self._ser.in_waiting > 0:
+            if self._ser and self._ser.in_waiting > 0:
                 b = self._ser.read()
                 try:
                     c = b.decode()
@@ -144,7 +165,14 @@ class ModemSimulator:
                         continue
                     _log.debug('Processing command: %s', _debugf(self._request))
                     response = ''
-                    if self.commands and self._request in self.commands:
+                    if self._request.lower().startswith('ATE'):
+                        self.echo = self._request.endswith('1')
+                        response = VRES_OK if self.verbose else RES_OK
+                    elif self._request.lower().startswith('ATV'):
+                        self.verbose = self._request.endswith('1')
+                        response = VRES_OK if self.verbose else RES_OK
+                    elif self.commands and self._request in self.commands:
+                        _log.debug('Processing custom response')
                         res_meta = self.commands[self._request]
                         if isinstance(res_meta, str):
                             response = res_meta
@@ -155,17 +183,48 @@ class ModemSimulator:
                                 time.sleep(res_meta['delay'])
                     elif self._request in self.default_ok:
                         response = VRES_OK if self.verbose else RES_OK
+                    elif 'BAD_BYTE' in self._request:
+                        self._ser.write(bytes([255]))
                     else:
                         _log.error('Unsupported command: %s', self._request)
                         response = VRES_ERR if self.verbose else RES_ERR
                     if response:
-                        _log.debug('Sending response: %s\n', _debugf(response))
+                        if not self.verbose:
+                            pattern = r'\r\n.*?\r\n'
+                            lines = re.findall(pattern, response, re.DOTALL)
+                            lines[-1] = lines[-1].strip() + '\r'
+                        _log.debug('Sending %s response: %s',
+                                   _debugf(self._request), _debugf(response))
                         self._ser.write(response.encode())
                     self._request = ''
                 except (UnicodeDecodeError, UnprintableException):
                     _log.error('Bad byte received [%d] - clearing buffer\n',
                                b[0])
                     self._request = ''
+    
+    def inject_urc(self, urc: str, v0_header: str = '\r\n'):
+        """Inject an unsolicited response code."""
+        if not isinstance(urc, str) or not urc:
+            _log.error('Invalid URC')
+            return
+        if self.verbose:
+            urc = f'\r\n{urc}\r\n'
+        else:
+            urc = f'{v0_header}{urc}\r\n'
+        _log.debug('Sending URC: %s', _debugf(urc))
+        self._ser.write(urc.encode())
+        self._ser.flush()
+    
+    def multi_urc(self, urcs: 'list[str]', v0_header: str = '\r\n'):
+        """Inject multiple unsolicited outputs."""
+        if self.verbose:
+            chained = '\r\n'.join(f'\r\n{urc}' for urc in urcs)
+        else:
+            chained = '\r\n'.join(f'{v0_header}{urc}' for urc in urcs)
+        chained += '\r\n'
+        _log.debug('Sending chained URCS: %s', _debugf(chained))
+        self._ser.write(chained.encode())
+        self._ser.flush()
     
     def stop(self):
         self._running = False

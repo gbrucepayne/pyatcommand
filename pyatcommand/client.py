@@ -1,25 +1,47 @@
 """Client module for AT commands.
 """
+import atexit
 import logging
 import os
 import threading
 import time
+from queue import Queue, Empty
+from warnings import warn
 
+import serial
 from dotenv import load_dotenv
-from serial import Serial, SerialException
 
-from .constants import AT_TIMEOUT, AT_URC_TIMEOUT, AtErrorCode, AtParsing
+from .constants import AT_TIMEOUT, AtErrorCode, AtParsing
+from .exception import AtCrcConfigError, AtDecodeError, AtTimeout
 from .utils import AtConfig, dprint, printable_char, vlog
-from .crcxmodem import validate_crc
+from .crcxmodem import validate_crc, apply_crc
 
 load_dotenv()
 
 VLOG_TAG = 'atclient'
-AT_RAW = os.getenv('AT_RAW') in [1, 'true', 'True', 'TRUE']
 AT_RAW_TX_TAG = '[RAW TX >>>] '
 AT_RAW_RX_TAG = '[RAW RX <<<] '
 
 _log = logging.getLogger(__name__)
+
+
+class AtResponse:
+    """A class defining a response to an AT command.
+    
+    Attributes:
+        result (AtErrorCode): The result code.
+        info (str): Information returned or empty string.
+        ok (bool): Flag indicating if the result code was a success.
+        crc_ok (bool): Flag indicating if CRC check passed, if supported.
+    """
+    def __init__(self, response: str = '', result: AtErrorCode = None):
+        self.info: str = response
+        self.result: AtErrorCode = result
+        self.crc_ok: 'bool|None' = None
+    
+    @property
+    def ok(self) -> bool:
+        return self.result == AtErrorCode.OK
 
 
 class AtClient:
@@ -31,20 +53,44 @@ class AtClient:
             **autoconfig (bool): Automatically detects verbose configuration
                 (default True)
         """
-        self._autoconfig = kwargs.get('autoconfig', True)
         self._supported_baudrates = [
             9600, 115200, 57600, 38400, 19200, 4800, 2400
         ]
+        self._is_debugging_raw = False
+        self._config: AtConfig = AtConfig()
+        self._serial: serial.Serial = None
+        self._timeout: 'float|None' = kwargs.get('timeout', 0)   # serial read timeout
+        self._lock = threading.Lock()
+        self._response_queue = Queue()
+        self._response = None
+        self._unsolicited_queue = Queue()
+        self._stop_event = threading.Event()
+        self._listener_thread: threading.Thread = None
+        self._wait_no_rx_data: float = 0.1
+        self._exception_queue = Queue()
+        self._crc_enable: str = ''
+        self._crc_disable: str = ''
+        self.auto_crc: bool = kwargs.get('auto_crc', False)
+        if not isinstance(self.auto_crc, bool):
+            raise ValueError('Invalid auto_crc setting')
+        self._cmd_pending: str = ''
+        self._command_timeout = AT_TIMEOUT
+        command_timeout = kwargs.get('command_timeout')
+        if command_timeout:
+            self.command_timeout = command_timeout
+        self._is_initialized: bool = False
+        self._rx_ready = threading.Event()
+        self._rx_ready.set()
+        atexit.register(self.disconnect)
+        # legacy backward compatibility below
+        self._autoconfig = kwargs.get('autoconfig', True)
         self._rx_buffer = ''
-        self._cmd_pending = ''
-        self._res_parsing: AtParsing = AtParsing.NONE
+        self._lcmd_pending: str = ''
         self._res_ready = False
         self._cmd_error: 'AtErrorCode|None' = None
-        self._debug_raw = False
-        self._config: AtConfig = AtConfig()
-        self._serial: Serial = None
         self.ready = threading.Event()
         self.ready.set()
+        self.allow_unprintable_ascii: bool = False
 
     @property
     def echo(self) -> bool:
@@ -58,33 +104,127 @@ class AtClient:
     def quiet(self) -> bool:
         return self._config.quiet
     
+    def _is_crc_cmd_valid(self, cmd: str) -> bool:
+        invalid_chars = ['?', self._config.cr, self._config.lf,
+                         self._config.sep]
+        if (isinstance(cmd, str) and cmd.startswith('AT') and '=' in cmd and
+            not any(c in cmd for c in invalid_chars)):
+            return True
+        return False
+    
+    @property
+    def crc_enable(self) -> str:
+        """The command to enable CRC."""
+        return self._crc_enable
+    
+    @crc_enable.setter
+    def crc_enable(self, value: str):
+        if not self._is_crc_cmd_valid(value):
+            raise ValueError('Invalid CRC enable string')
+        self._crc_enable = value
+        # convenience feature for numeric toggle
+        if value.endswith('=1'):
+            self.crc_disable = value.replace('=1', '=0')
+        
+    @property
+    def crc_disable(self) -> str:
+        """The command to disable CRC."""
+        return self._crc_disable
+    
+    @crc_disable.setter
+    def crc_disable(self, value: str):
+        if not self._is_crc_cmd_valid(value):
+            raise ValueError('Invalid CRC disable string')
+        self._crc_disable = value
+        
+    @property
+    def crc_sep(self) -> str:
+        """The CRC indicator to appear after the result code."""
+        return self._config.crc_sep
+    
+    @crc_sep.setter
+    def crc_sep(self, value: str):
+        invalid_chars = ['=', '?', self._config.cr, self._config.lf,
+                         self._config.sep]
+        if (not isinstance(value, str) or len(value) != 1 or
+            value in invalid_chars):
+            raise ValueError('Invalid separator')
+        self._config.crc_sep = value
+        
     @property
     def crc(self) -> bool:
         return self._config.crc
     
     @property
     def terminator(self) -> str:
-        return f'{self._config.cr}{self._config.lf}'
+        """The command terminator character."""
+        return f'{self._config.cr}'
         
     @property
-    def vres_ok(self) -> str:
-        return f'{self.terminator}OK{self.terminator}'
+    def header(self) -> str:
+        """The response header common to info and result code."""
+        if self._config.verbose:
+            return f'{self._config.cr}{self._config.lf}'
+        return ''
     
     @property
-    def vres_err(self) -> str:
-        return f'{self.terminator}ERROR{self.terminator}'
+    def trailer_info(self) -> str:
+        """The trailer for information responses."""
+        return f'{self._config.cr}{self._config.lf}'
+    
+    @property
+    def trailer_result(self) -> str:
+        """The trailer for the result code."""
+        if self._config.verbose:
+            return f'{self._config.cr}{self._config.lf}'
+        return self._config.cr
     
     @property
     def cme_err(self) -> str:
-        return f'{self.terminator}+CME ERROR:'
+        """The prefix for CME errors."""
+        return '+CME ERROR:'
     
     @property
-    def res_ok(self) -> str:
-        return f'{AtErrorCode.OK}{self._config.cr}'
+    def res_V1(self) -> 'list[str]':
+        """Get the set of verbose result codes compatible with startswith."""
+        CRLF = f'{self._config.cr}{self._config.lf}'
+        return [
+            f'{CRLF}OK{CRLF}',
+            f'{CRLF}ERROR{CRLF}',
+            f'{CRLF}+CME ERROR:',
+            f'{CRLF}+CMS ERROR:',
+        ]
     
     @property
-    def res_err(self) -> str:
-        return f'{AtErrorCode.ERROR}{self._config.cr}'
+    def res_V0(self) -> 'list[str]':
+        """Get the set of non-verbose result codes."""
+        return [
+            f'0{self._config.cr}',
+            f'4{self._config.cr}',
+        ]
+    
+    @property
+    def result_codes(self) -> 'list[str]':
+        return self.res_V0 + self.res_V1
+    
+    @property
+    def command_pending(self) -> str:
+        return self._cmd_pending.strip()
+    
+    @property
+    def command_timeout(self) -> float:
+        return self._command_timeout
+    
+    @command_timeout.setter
+    def command_timeout(self, value: 'float|None'):
+        if value is not None and not isinstance(value, (float, int)) or value < 0:
+            raise ValueError('Invalid default command timeout')
+        self._command_timeout = value
+    
+    def _debug_raw(self) -> bool:
+        """Check if environment is configured for raw serial debug."""
+        return (os.getenv('AT_RAW') and
+                os.getenv('AT_RAW').lower() in ['1', 'true'])
     
     def connect(self, **kwargs) -> None:
         """Connect to a serial port AT command interface.
@@ -96,50 +236,94 @@ class AtClient:
         Args:
             **port (str): The serial port name.
             **baudrate (int): The serial baud rate (default 9600).
+            **timeout (float): The serial read timeout in seconds (default 1)
+            **autobaud (bool): Set to retry different baudrates (default True)
             **retry_timeout (float): Maximum time (seconds) to retry connection
                 (default 0 = forever)
+            **retry_delay (float): Holdoff time between reconnect attempts
+                (default 0.5 seconds)
+            **echo (bool): Initialize with echo (default True)
+            **verbose (bool): Initialize with verbose (default True)
+            **crc (bool): Initialize with CRC, if supported (default False)
             
         Raises:
             `ConnectionError` if unable to connect.
-            
+            `ValueError` for invalid parameter settings.
         """
         port = kwargs.pop('port', os.getenv('SERIAL_PORT', '/dev/ttyUSB0'))
+        autobaud = kwargs.pop('autobaud', True)
+        if not isinstance(autobaud, bool):
+            raise ValueError('Invalid autobaud setting')
         retry_timeout = kwargs.pop('retry_timeout', 0)
         retry_delay = kwargs.pop('retry_delay', 0.5)
+        init_keys = ['echo', 'verbose', 'crc', 'ati']
+        init_kwargs = {k: kwargs.pop(k) for k in init_keys if k in kwargs}
         if not isinstance(retry_timeout, (int, float)) or retry_timeout < 0:
             raise ValueError('Invalid retry_timeout')
         try:
-            baudrate = kwargs.get('baudrate', 9600)
-            _log.debug('Attempting to connect to %s at %d baud', port, baudrate)
-            self._serial = Serial(port, **kwargs)
-        except SerialException as err:
+            if 'timeout' not in kwargs:
+                kwargs['timeout'] = self._timeout
+            self._serial = serial.Serial(port, **kwargs)
+        except serial.SerialException as err:
             raise ConnectionError('Unable to open port') from err
+        attempts = 0
         start_time = time.time()
         while not self.is_connected():
             if retry_timeout and time.time() - start_time > retry_timeout:
                 raise ConnectionError('Timed out trying to connect')
+            attempts += 1
+            _log.debug('Attempting to connect to %s at %d baud (attempt %d)',
+                       port, self._serial.baudrate, attempts)
+            if self._get_initial_config():
+                self._listener_thread = threading.Thread(target=self._listen,
+                                                         name='AtListenerThread',
+                                                         daemon=True)
+                self._listener_thread.start()
+                if self._initialize(**init_kwargs):
+                    self._stop_event.clear()
+                    break
             time.sleep(retry_delay)
-            idx = self._supported_baudrates.index(self._serial.baudrate) + 1
-            if idx >= len(self._supported_baudrates):
-                idx = 0
-            self._serial.baudrate = self._supported_baudrates[idx]
-            _log.debug('Attempting to connect to %s at %d baud',
-                       port, self._serial.baudrate)
+            if autobaud:
+                idx = self._supported_baudrates.index(self._serial.baudrate) + 1
+                if idx >= len(self._supported_baudrates):
+                    idx = 0
+                self._serial.baudrate = self._supported_baudrates[idx]
         _log.debug('Connected to %s at %d baud', port, self._serial.baudrate)
+    
+    def _get_initial_config(self, timeout: float = 0.5) -> bool:
+        with self._lock:
+            if self._serial.in_waiting > 0:
+                self._serial.read(self._serial.in_waiting)
+            self._serial.write(f'AT\r'.encode())
+            buffer = ''
+            start_time = time.time()
+            while time.time() - start_time < timeout:
+                if self._serial.in_waiting > 0:
+                    data = self._serial.read(self._serial.in_waiting)
+                    buffer += data.decode('ascii', errors='ignore')
+                    if not any(res in buffer for res in self.result_codes):
+                        continue
+                    self._config.verbose = any(res in buffer 
+                                               for res in self.res_V1)
+                    self._config.echo = buffer.startswith(f'AT{self.terminator}')
+                    lines = buffer.splitlines()
+                    for line in lines:
+                        if line.startswith(self.crc_sep):
+                            self._config.crc = True
+                            break
+                    return True
+            return False
     
     def is_connected(self) -> bool:
         """Check if the modem is responding to AT commands"""
-        if not isinstance(self._serial, Serial):
-            return False
-        _log.debug('Checking connectivity...')
-        valid_results = [AtErrorCode.OK, AtErrorCode.ERR_CMD_CRC]
-        valid = self.send_at_command('AT') in valid_results
-        _ = self.get_response()   # clear any residual from read buffer
-        return valid
+        return self._is_initialized
         
     def disconnect(self) -> None:
         """Diconnect from the serial port"""
-        if isinstance(self._serial, Serial):
+        if self._serial:
+            self._is_initialized = False
+            self._stop_event.set()
+            self._listener_thread.join()
             self._serial.close()
             self._serial = None
     
@@ -149,392 +333,613 @@ class AtClient:
             return None
         return self._serial.baudrate
     
-    def _read_serial_char(self, ignore_unprintable: bool = True) -> bool:
-        """Read the next valid ASCII character from serial
-        
-        Args:
-            ignore_unprintable: Flag to indicate an invalid byte was read
-            
-        Returns:
-            True if a valid character was read or invalid ignored
-        """
-        if self._serial.in_waiting == 0:
-            return True
-        c = self._serial.read(1)[0]
-        if printable_char(c, self._debug_raw):
-            self._rx_buffer += chr(c)
-            return True
-        else:
-            _log.warning('Unprintable byte: %s', hex(c))
-        return ignore_unprintable
-    
-    def _last_char_read(self, n: int = 1) -> str:
-        """Get the nth last character read"""
-        if n <= 0 or len(self._rx_buffer) < n:
-            return -1
-        return self._rx_buffer[-n]
-    
     def _toggle_raw(self, raw: bool) -> None:
         """Toggles delimiters for streaming of received characters to stdout"""
-        if AT_RAW:
+        if self._debug_raw():
             if raw:
-                if not self._debug_raw:
+                if not self._is_debugging_raw:
                     print(f'{AT_RAW_RX_TAG}', end='')
-                self._debug_raw = True
+                self._is_debugging_raw = True
             else:
-                if self._debug_raw:
+                if self._is_debugging_raw:
                     print()
-                self._debug_raw = False
+                self._is_debugging_raw = False
+    
+    def _initialize(self,
+                    echo: bool = True,
+                    verbose: bool = True,
+                    crc: 'bool|None' = None,
+                    **kwargs) -> bool:
+        """Determine or set the initial AT configuration.
+        
+        Args:
+            echo (bool): Echo commands if True (default E1).
+            verbose (bool): Use verbose formatting if True (default V1).
+            crc (bool|None): Use CRC-16-CCITT if True. Property
+                `crc_enable` must be a valid command.
+            **ati (bool): Log basic modem information query
+        
+        Returns:
+            True if successful.
+        
+        Raises:
+            `ConnectionError` if serial port not enabled or no DCE response.
+            `ValueError` if CRC is not `None` but `crc_enable` is undefined.
+            `AtCrcConfigError` if CRC detected but not configured.
+        """
+        if not self._serial:
+            raise ConnectionError('Serial port not configured')
+        if crc is not None and not self.crc_enable:
+            raise ValueError('CRC command undefined')
+        try:
+            _log.debug('Initializing AT configuration')
+            # first manage CRC if supported
+            if self.crc_enable:
+                res_crc = None
+                if crc and not self.crc:
+                    res_crc = self.send_command(self.crc_enable)
+                elif not crc and self.crc is True:
+                    res_crc = self.send_command(apply_crc(self.crc_disable,
+                                                          self._config.crc_sep))
+                if res_crc and not res_crc.ok:
+                    _log.warning('Error %sabling CRC', 'en' if crc else 'dis')
+            if echo != self.echo:
+                # configure echo (enabled allows disambiguating URC from response)
+                echo_cmd = f'ATE{int(echo)}'
+                if self.crc:
+                    echo_cmd = apply_crc(echo_cmd)
+                res_echo = self.send_command(echo_cmd)
+                if not res_echo or not res_echo.ok:
+                    _log.warning('Error setting ATE%d', int(echo))
+            if verbose != self.verbose:
+                # configure verbose
+                verbose_cmd = f'ATV{int(verbose)}'
+                if self.crc:
+                    verbose_cmd = apply_crc(verbose_cmd)
+                res_verbose = self.send_command(verbose_cmd)
+                if not res_verbose or not res_verbose.ok:
+                    _log.warning('Error setting ATV%d', int(verbose))
+            # optional verbose logging of configuration details
+            if vlog(VLOG_TAG):
+                dbg = '\n'.join(f'{k} = {dprint(str(v))}'
+                                for k, v in vars(self._config).items())
+                if self.crc_enable:
+                    dbg += f'CRC enable = {self.crc_enable}'
+                _log.debug('AT Config:\n%s', dbg)
+            self._is_initialized = True
+            # optional log device information
+            if kwargs.get('ati') is True:
+                ati_cmd = 'ATI' if not self.crc else apply_crc('ATI')
+                res_ati = self.send_command(ati_cmd, timeout=10)
+                if not res_ati or not res_ati.ok:
+                    _log.warning('Error querying ATI')
+                else:
+                    _log.info('Modem information:\n%s', res_ati.info)
+        except (serial.SerialException, UnicodeDecodeError, IOError) as err:
+            _log.debug('Init failed: %s', err)
+            self._is_initialized = False
+        return self._is_initialized
+    
+    def send_command(self,
+                     command: str,
+                     timeout: 'float|None' = AT_TIMEOUT,
+                     prefix: str = '',
+                     **kwargs) -> 'AtResponse|str':
+        """Send an AT command and get the response.
+        
+        Args:
+            command (str): The AT command to send.
+            timeout (float): The maximum time in seconds to wait for a response.
+                `None` returns immediately and any response will be orphaned.
+            prefix (str): The prefix to remove.
+            **raw (bool): Return the full raw response with formatting if set.
+            **rx_ready_wait (float|None): Maximum time to wait for Rx ready
+        
+        Raises:
+            `ValueError` if command is not a valid string or timeout is invalid.
+            `ConnectionError` if the receive buffer is blocked.
+            `AtTimeout` if no response received within timeout.
+        """
+        if not isinstance(command, str) or not command:
+            raise ValueError('Invalid command')
+        if timeout is not None:
+            if not isinstance(timeout, (float, int)) or timeout < 0:
+                raise ValueError('Invalid command timeout')
+        if timeout == AT_TIMEOUT and self._command_timeout != AT_TIMEOUT:
+            timeout = self._command_timeout
+        raw = kwargs.get('raw', False)
+        rx_ready_wait = kwargs.get('rx_wait_timeout', AT_TIMEOUT)
+        if not isinstance(rx_ready_wait, (float, int)):
+            raise ValueError('Invalid rx_ready_wait')
+        with self._lock:
+            if not self._rx_ready.is_set():
+                _log.debug('Waiting for RX ready')
+                start_time = time.time()
+                self._rx_ready.wait(rx_ready_wait)
+                if time.time() - start_time > rx_ready_wait:
+                    err_msg = f'RX ready timed out after {timeout} seconds'
+                    _log.warning(err_msg)
+                    # raise ConnectionError(err_msg)
+                time.sleep(0.01)   # allow time for previous command to retrieve
+            while not self._response_queue.empty():
+                dequeued = self._response_queue.get_nowait()
+                _log.warning('Dumped prior output: %s', dprint(dequeued))
+            # self._serial.reset_output_buffer()
+            if self.crc and self.auto_crc:
+                command = apply_crc(command)
+            self._cmd_pending = command
+            if not command.endswith((self.terminator, self.trailer_info)):
+                self._cmd_pending += self.terminator
+            _log.debug('Sending command (timeout %0.1f): %s',
+                       timeout, dprint(self._cmd_pending))
+            if self._debug_raw():
+                print(f'{AT_RAW_TX_TAG}{dprint(self._cmd_pending)}')
+            self._serial.write(f'{self._cmd_pending}'.encode())
+            self._serial.flush()
+            try:
+                if timeout is None:
+                    _log.warning(f'{command} timeout None may orphan response')
+                    return
+                try:
+                    response: str = self._response_queue.get(timeout=timeout)
+                    if response is None:
+                        exc = self._exception_queue.get_nowait()
+                        if exc:
+                            raise exc
+                    _log.debug('Response to %s: %s',
+                                command, dprint(response))
+                    if raw:
+                        return response
+                    return self._get_at_response(response, prefix)
+                except Empty:
+                    err_msg = f'Command timed out: {command} ({timeout} s)'
+                    _log.warning(err_msg)
+                    raise AtTimeout(err_msg)
+            finally:
+                self._cmd_pending = ''
+    
+    def _get_at_response(self, response: str, prefix: str = '') -> AtResponse:
+        """Convert a raw response to `AtResponse`"""
+        at_response = AtResponse()
+        parts = [x for x in response.strip().split(self.trailer_info) if x]
+        if not self._config.verbose:
+            parts += parts.pop().split(self.trailer_result)
+        if self._config.crc_sep in parts[-1]:
+            _ = parts.pop()   # remove CRC
+            at_response.crc_ok = validate_crc(response, self._config.crc_sep)
+        if not (self._cmd_pending or self._lcmd_pending):
+            at_response.result = AtErrorCode.URC
+            at_response.info = '\n'.join(parts)
+        else:
+            result = parts.pop(-1)
+            if result in ['OK', '0']:
+                at_response.result = AtErrorCode.OK
+            else:
+                err_code = AtErrorCode.ERROR
+                if result.startswith(('+CME', '+CMS')):
+                    prefix, info = result.split('ERROR:')
+                    at_response.info = info.strip()
+                    err_code = AtErrorCode.CME_ERROR
+                    if result.startswith('+CMS'):
+                        err_code = AtErrorCode.CMS_ERROR
+                at_response.result = err_code
+        if (self._cmd_pending or self._lcmd_pending) and len(parts) > 0:
+            if prefix:
+                if (not parts[0].startswith(prefix) and
+                    any(part.startswith(prefix) for part in parts)):
+                    # Unexpected pre-response data
+                    while not parts[0].startswith(prefix):
+                        urc = parts.pop(0)
+                        self._unsolicited_queue.put(urc)
+                        _log.warning('Found pre-response URC: %s', dprint(urc))
+                elif not parts[0].startswith(prefix):
+                    _log.warning('Prefix %s not found', prefix)
+                parts[0] = parts[0].replace(prefix, '', 1).strip()
+            at_response.info = '\n'.join(parts)
+        return at_response
+    
+    def get_urc(self, timeout: 'float|None' = 0.1) -> 'str|None':
+        """Retrieves an Unsolicited Result Code if present.
+        
+        Args:
+            timeout (float): The maximum seconds to block waiting
+        
+        Returns:
+            The URC string if present or None.
+        """
+        try:
+            return self._unsolicited_queue.get(timeout=timeout).strip()
+        except Empty:
+            return None
+    
+    def _read_chunk(self, size: int = None) -> str:
+        """Attempt to read a character from the serial port.
+        
+        Args:
+            size (int): The number of bytes to read. If None, read all waiting.
+        
+        Returns:
+            str: The ASCII character
+        
+        Raises:
+            `AtDecodeError` if not printable.
+        """
+        if size is not None and not isinstance(size, int):
+            raise ValueError('Invalid size')
+        chunk = ''
+        if self._serial.in_waiting > 0:
+            if size is None:
+                size = self._serial.in_waiting
+            data = self._serial.read(size)
+            if vlog(VLOG_TAG + 'dev') and size > 1:
+                _log.debug('Read %d-byte chunk', len(data))
+            for i, c in enumerate(data):
+                if (not printable_char(c, self._is_debugging_raw)
+                    and self.allow_unprintable_ascii is not True):
+                    err_msg = f'Unprintable byte {hex(c)}'
+                    raise AtDecodeError(err_msg)
+            chunk = data.decode('ascii')
+        return chunk
+    
+    def _update_config(self, prop_name: str, detected: bool):
+        """Updates the AT command configuration (E, V, Q, etc.)
+        
+        Args:
+            prop_name (str): The configuration property e.g. `echo`.
+            detected (bool): The value detected during parsing.
+        
+        Raises:
+            `ValueError` if prop_name not recognized.
+        """
+        if not hasattr(self._config, prop_name):
+            raise ValueError('Invalid prop_name %s', prop_name)
+        if getattr(self._config, prop_name) != detected:
+            abbr = { 'echo': 'E', 'verbose': 'V', 'quiet': 'Q' }
+            if self.crc_enable:
+                pname = self.crc_enable.split('=')[0].replace('AT', '')
+                abbr['crc'] = f'{pname}='
+            self._toggle_raw(False)
+            if prop_name in abbr:
+                _log.warning('Detected %s%d - updating config',
+                            abbr[prop_name], int(detected))
+                setattr(self._config, prop_name, detected)
+            else:
+                _log.warning('Unknown property %s', prop_name)
+
+    def _listen(self):
+        """Background thread to listen for responses/unsolicited."""
+        
+        def _at_splitlines(buf: str) -> 'list[str]':
+            """Split a buffer into lines according to AT spec."""
+            lines = []
+            start = 0
+            length = len(buf)
+            for i, char in enumerate(buf):
+                if char in f'{self._config.cr}{self._config.lf}':
+                    end = i + 1
+                    # Handle \r\n as a single line break
+                    if (char == self._config.cr and i + 1 < length
+                        and buf[i + 1] == self._config.lf):
+                        end += 1
+                        lines.append(buf[start:end])
+                        i += 1
+                    else:
+                        if end > start:
+                            lines.append(buf[start:end])
+                    start = i + 1
+            # Add any remaining text as the last line
+            if start < length:
+                lines.append(buf[start:])
+            if lines != buf.splitlines(True):
+                _log.warning('splitlines error!')
+            for i, line in enumerate(lines):
+                if line == self.trailer_info and i < len(lines) - 1:
+                    lines[i + 1] = self.trailer_info + lines[i + 1]
+                elif line.endswith(self.trailer_info) and i < len(lines) - 1:
+                    noncompliant = [r.lstrip() for r in self.res_V1]
+                    if lines[i + 1] in noncompliant:
+                        _log.warning('Fixing non-compliant response: %s',
+                                     dprint(line + lines[i + 1]))
+                        lines[i + 1] = self.header + lines[i + 1]
+            return [l for l in lines if l.strip()]
+        
+        def _is_response(buf: str, verbose: bool = True) -> bool:
+            """Check if the buffer conforms to AT response spec."""
+            lines = _at_splitlines(buf)
+            if len(lines) == 0:
+                return False
+            last = lines[-1]
+            if not verbose:
+                result = any(last == res for res in self.res_V0)
+            else:
+                result = any(last.startswith(res) for res in self.res_V1)
+            vtype = 'V1' if verbose else 'V0'
+            if result and vlog(VLOG_TAG):
+                _log.debug('Found %s response: %s', vtype, dprint(buf))
+            elif not result and vlog(VLOG_TAG + 'dev'):
+                _log.debug('Not a %s response: %s', vtype, dprint(buf))
+            return result
+        
+        def _is_crc_toggle(on: bool = False) -> bool:
+            """Check if the command will toggle CRC."""
+            if on is True:
+                return (self.crc_enable and
+                        self.command_pending.startswith(self.crc_enable))
+            return (self.crc_disable and
+                    self.command_pending.startswith(self.crc_disable))
+            
+        def _is_crc(buffer: str) -> bool:
+            """Check if the buffer is a CRC for a response."""
+            line = buffer.strip()
+            return len(line) > 4 and line[-5] == self._config.crc_sep
+            
+        def _has_echo(buf: str) -> bool:
+            """Check if the buffer includes an echo for the pending command."""
+            return self._cmd_pending != '' and self._cmd_pending in buf
+        
+        def _remove_echo(buf: str) -> str:
+            """Remove the pending command echo from the response."""
+            if self._cmd_pending and self._cmd_pending in buf:
+                if not buf.startswith(self._cmd_pending):
+                    pre_echo = buf.split(self._cmd_pending)[0]
+                    _log.warning('Found pre-echo data: %s', dprint(pre_echo))
+                    buf = buf.replace(pre_echo, '', 1)
+                    residual = _process_urcs(pre_echo)
+                    if residual:
+                        _log.warning('Dumped residual data: %s', dprint(residual))
+                self._update_config('echo', True)
+                buf = buf.replace(self._cmd_pending, '', 1)
+                if vlog(VLOG_TAG):
+                    _log.debug('Removed echo from buffer (%s)',
+                               dprint(self._cmd_pending))
+            return buf
+        
+        def _process_urcs(buf: str) -> str:
+            """Process URC(s) from the buffer into the unsolicited queue."""
+            urcs = _at_splitlines(buf)
+            for urc in urcs:
+                if not urc.strip() or _has_echo(urc):
+                    continue
+                if _is_response(urc):
+                    _log.warning('Discarding orphan response: %s', dprint(urc))
+                else:
+                    self._unsolicited_queue.put(urc)
+                    if vlog(VLOG_TAG):
+                        _log.debug('Processed URC: %s', dprint(urc))
+                buf = buf.replace(urc, '', 1)
+            return buf
+            
+        def _complete_parsing(buf: str) -> str:
+            """Complete the parsing of a response or unsolicited"""
+            self._toggle_raw(False)
+            if self._cmd_pending:
+                self._response_queue.put(buf)
+                if vlog(VLOG_TAG):
+                    _log.debug('Processed response: %s', dprint(buf))
+            else:
+                if _process_urcs(buf):
+                    _log.warning('Discarding residual buffer data: %s',
+                                 dprint(buf))
+            if self._serial.in_waiting > 0:
+                _log.debug('More RX data to process')
+            else:
+                self._rx_ready.set()
+                if vlog(VLOG_TAG):
+                    _log.debug('RX ready')
+            return ''
+        
+        buffer = ''
+        peeked = ''
+        while not self._stop_event.is_set():
+            if not self._serial or not self.ready.is_set():
+                continue
+            try:
+                while self._serial.in_waiting > 0 or peeked:
+                    if self._rx_ready.is_set():
+                        self._rx_ready.clear()
+                        if vlog(VLOG_TAG):
+                            _log.debug('RX busy')
+                    if not self._is_debugging_raw:
+                        self._toggle_raw(True)
+                    if peeked:
+                        chunk = peeked
+                        peeked = ''
+                    else:
+                        chunk = self._read_chunk(1)
+                    if not chunk:
+                        continue
+                    buffer += chunk
+                    if not buffer.strip():
+                        continue   # keep reading data
+                    last_char = buffer[-1]
+                    if last_char == self._config.lf:
+                        if vlog(VLOG_TAG + 'dev'):
+                            self._toggle_raw(False)
+                            _log.debug('Assessing LF: %s', dprint(buffer))
+                        if _is_response(buffer):
+                            self._update_config('verbose', True)
+                            if _has_echo(buffer):
+                                self._update_config('echo', True)
+                                buffer = _remove_echo(buffer)
+                            if _is_crc_toggle(True) and 'OK' in buffer:
+                                self._update_config('crc', True)
+                            if self.crc:
+                                if (not _is_crc_toggle() or
+                                    (_is_crc_toggle() and 'OK' not in buffer)):
+                                    if vlog(VLOG_TAG + 'dev'):
+                                        _log.debug('Continue reading for CRC')
+                                    continue   # keep processing for CRC
+                                if _is_crc_toggle() and 'OK' in buffer:
+                                    self._update_config('crc', False)
+                            else:   # check if CRC is configured but unknown
+                                peeked = self._read_chunk(1)
+                                if peeked == self._config.crc_sep:
+                                    self._update_config('crc', True)
+                                    continue
+                            buffer = _complete_parsing(buffer)
+                        elif _is_crc(buffer):
+                            self._update_config('crc', True)
+                            if _has_echo(buffer):
+                                self._update_config('echo', True)
+                                buffer = _remove_echo(buffer)
+                            if not validate_crc(buffer, self._config.crc_sep):
+                                self._toggle_raw(False)
+                                _log.warning('Invalid CRC')
+                            buffer = _complete_parsing(buffer)
+                        elif not self._cmd_pending:
+                            buffer = _complete_parsing(buffer)
+                    elif last_char == self._config.cr:
+                        if vlog(VLOG_TAG + 'dev'):
+                            self._toggle_raw(False)
+                            _log.debug('Assessing CR: %s', dprint(buffer))
+                        if _has_echo(buffer):
+                            if not buffer.startswith(self.command_pending):
+                                _log.debug('Assessing pre-echo URC race: %s',
+                                           dprint(buffer))
+                                buffer = _process_urcs(buffer)
+                            self._update_config('echo', True)
+                            buffer = _remove_echo(buffer)
+                        elif _is_response(buffer, verbose=False): # check for V0
+                            peeked = self._read_chunk(1)
+                            if peeked != self._config.lf:   # V0 confirmed
+                                self._update_config('verbose', False)
+                                if peeked == self._config.crc_sep:
+                                    self._update_config('crc', True)
+                                else:
+                                    buffer = _complete_parsing(buffer)
+                                    continue
+            except (AtDecodeError, serial.SerialException) as err:
+                buffer = ''
+                _log.error('%s: %s', err.__class__.__name__, str(err))
+                self._exception_queue.put(err)
+                if self._cmd_pending:
+                    self._response_queue.put(None)
+                if isinstance(err, serial.SerialException):
+                    self._stop_event.set()
+            time.sleep(self._wait_no_rx_data)   # Prevent CPU overuse
+            if not self._rx_ready.is_set():
+                if vlog(VLOG_TAG):
+                    _log.warning('Set RX ready after no data for %0.2fs',
+                                 self._wait_no_rx_data)
+                    self._rx_ready.set()
+
+    # Legacy interface below
     
     def send_at_command(self,
                         at_command: str,
-                        timeout: float = AT_TIMEOUT) -> AtErrorCode:
+                        timeout: float = AT_TIMEOUT,
+                        **kwargs) -> AtErrorCode:
         """Send an AT command and parse the response
         
-        Setting timeout 0 avoids parsing the response to allow for intermediate
-        processing. The calling function must then call `_read_at_response()`.
+        Call `get_response()` next to retrieve information responses.
+        Backward compatible for legacy integrations.
         
         Args:
-            at_command: The command to send
-            timeout: The maximum time to wait for a response
+            at_command (str): The command to send
+            timeout (float): The maximum time to wait for a response.
         
         Returns:
             `AtErrorCode` indicating success (0) or failure
         """
-        if not isinstance(self._serial, Serial) or not self._serial.is_open:
-            _log.error('Serial port connection not established')
-            return AtErrorCode.ERR_TIMEOUT
-        self.ready.wait()
-        self.ready.clear()
-        self._serial.flush()
-        while self._serial.in_waiting > 0:
-            self._read_serial_char()
-        if len(self._rx_buffer) > 0:
-            _log.warning('Dumping unsolicited Rx data: %s',
-                         dprint(self._rx_buffer))
-            self._rx_buffer = ''
-        self._cmd_pending = at_command + '\r'
-        _log.debug('Sending command (timeout %0.1f): %s',
-                   timeout, dprint(self._cmd_pending))
-        if AT_RAW:
-            print(f'{AT_RAW_TX_TAG}{dprint(self._cmd_pending)}')
-        self._serial.write(self._cmd_pending.encode())
-        self._serial.flush()
-        if timeout != 0:
-            return self._read_at_response(timeout)
-        self.ready.set()
-        return AtErrorCode.PENDING
-    
-    def _read_at_response(self, timeout: float = AT_TIMEOUT) -> AtErrorCode:
-        """Read and parse individual bytes received after a command"""
-        if self.ready.is_set():
-           self.ready.clear() 
-        if vlog(VLOG_TAG):
-            _log.debug('Parsing response to %s for %d s',
-                       dprint(self._cmd_pending), timeout)
-        self._res_parsing = AtParsing.RESPONSE
-        if self.echo:
-            self._res_parsing = AtParsing.ECHO
-        self._cmd_error = AtErrorCode.ERROR
-        result_ok = False
-        crc_found = False
-        peeked: str = ''
-        start_time = time.time()
-        countdown = timeout
-        tick = 1 if vlog(VLOG_TAG) else 0
-        if vlog(VLOG_TAG):
-            _log.debug('Timeout: %0.1f; Countdown: %d s', timeout, countdown)
-        while (timeout == -1 or (time.time() - start_time < timeout)):
-            if ((self._serial.in_waiting > 0 or peeked) and
-                self._res_parsing < AtParsing.OK):
-                self._toggle_raw(True)
-                if peeked:
-                    peeked = ''
-                elif not self._read_serial_char():
-                    self._cmd_error = AtErrorCode.ERR_BAD_BYTE
-                    self._res_parsing = AtParsing.ERROR
-                    self._toggle_raw(False)
-                    _log.error('Bad byte received in response')
-                    break
-                last = self._last_char_read()
-                if last == self._config.lf:
-                    # unsolicited, V0 info-suffix/multiline sep, V1 prefix/multiline/suffix
-                    if (self._res_parsing == AtParsing.ECHO or
-                        self._rx_buffer.startswith(self.terminator)):
-                        # check if V0 info-suffix or multiline separator
-                        if self._last_char_read(2) != self._config.cr:
-                            self._toggle_raw(False)
-                            _log.warning('Unexpected response data removed: %s',
-                                            dprint(self._rx_buffer))
-                            self._rx_buffer = ''
-                    if self._rx_buffer.endswith(self.vres_ok):
-                        self._toggle_raw(False)
-                        self._res_parsing = self._parsing_ok()
-                        if self._autoconfig:
-                            self._config.verbose = True
-                    elif (self._rx_buffer.endswith(self.vres_err) or
-                            self._rx_buffer.startswith(self.cme_err)):
-                        self._toggle_raw(False)
-                        self._res_parsing = self._parsing_error()
-                        if self._autoconfig:
-                            self._config.verbose = True
-                    elif self._res_parsing == AtParsing.CRC:
-                        self._toggle_raw(False)
-                        if vlog(VLOG_TAG):
-                            _log.debug('CRC parsing complete')
-                        if not result_ok:
-                            self._res_parsing = AtParsing.ERROR
-                        else:
-                            if validate_crc(self._rx_buffer):
-                                self._res_parsing = AtParsing.OK
-                            else:
-                                _log.warning('Invalid CRC')
-                                self._res_parsing = AtParsing.ERROR
-                                self._cmd_error = AtErrorCode.ERR_CMD_CRC
-                                result_ok = False
-                    # else multiline separator - keep parsing
-                elif last == self._config.cr:
-                    if self._rx_buffer.endswith(self._cmd_pending):
-                        self._toggle_raw(False)
-                        if not self._rx_buffer.startswith(self._cmd_pending):
-                            _log.warning('Unexpected pre-echo data removed: %s',
-                                            dprint(self._rx_buffer[:len(self._cmd_pending)]))
-                        if vlog(VLOG_TAG):
-                            _log.debug('Echo received - clearing Rx buffer: %s',
-                                        dprint(self._rx_buffer))
-                        self._rx_buffer = ''
-                        self._res_parsing = AtParsing.RESPONSE
-                    else:
-                        if self._serial.in_waiting > 0:
-                            self._read_serial_char()
-                            peeked = self._last_char_read()
-                            if peeked == self._config.crc_sep:
-                                self._toggle_raw(False)
-                                self._res_parsing = self._parsing_short()
-                elif (last == self._config.crc_sep and
-                        self._res_parsing == AtParsing.CRC):
-                    crc_found = True
-                if (vlog(VLOG_TAG) and tick > 0 and len(self._rx_buffer) == 0):
-                    if (time.time() - start_time) >= tick:
-                        tick += 1
-                        countdown -= 1
-                        self._toggle_raw(False)
-                        _log.debug('Countdown: %d', countdown)
-            if self._res_parsing >= AtParsing.OK:
-                break
-        self._toggle_raw(False)
-        if vlog(VLOG_TAG):
-            _log.debug('Final parsing state: %s', self._res_parsing.name)
-        if self._res_parsing < AtParsing.OK:
-            if result_ok:
-                if (self.verbose and
-                    self._rx_buffer.endswith(self._config.cr)):
-                    _log.info('Detected non-verbose')
-                    self._config.verbose = False
-                elif self.crc and not crc_found:
-                    _log.info('CRC expected but not found - clearing flag')
-                    self._config.crc = False
-                    self._cmd_error = AtErrorCode.ERR_CRC_CONFIG
-            else:
-                _log.warning('AT command timeout during parsing')
+        response = self.send_command(at_command, timeout, raw=True)
+        if not response:
+            if timeout is not None:
                 self._cmd_error = AtErrorCode.ERR_TIMEOUT
-        elif self._res_parsing == AtParsing.ERROR:
-            if not self.crc and crc_found:
-                _log.warning('CRC detected but not expected')
-                self._config.crc = True
-            elif self._rx_buffer.startswith(self.cme_err):
-                try:
-                    self._cmd_error = (
-                        int(self._rx_buffer.replace(self.cme_err, '').strip()))
-                    _log.debug('Found CME ERROR %d - clearing response buffer',
-                               self._cmd_error)
-                except Exception as exc:
-                    _log.error(exc)
-                self._rx_buffer = ''
-        else:
-            self._res_ready = True
-            self._cmd_error = AtErrorCode.OK
-        if vlog(VLOG_TAG):
-            _log.debug('Parsing complete (error code %d) - clearing command %s',
-                       self._cmd_error, dprint(self._cmd_pending))
-        if self._res_ready:
-            _log.debug('Response: %s', dprint(self._rx_buffer))
-        empty_res = [self.vres_ok, self.vres_err, self.res_ok, self.res_err]
-        if self._rx_buffer in empty_res:
-            self._rx_buffer = ''
-        self._cmd_pending = ''
-        self.ready.set()
-        return self._cmd_error
-    
-    def _parsing_short(self) -> AtParsing:
-        """Determine next stage of parsing after potential non-verbose response
-        """
-        if (self._rx_buffer.startswith(self.terminator) or
-            not self._rx_buffer.endswith((self.res_ok, self.res_err))):
-            # just read too fast, keep parsing
-            return self._res_parsing
-        if self._rx_buffer.endswith((self.res_ok, self.res_err)):
-            # check if really response code or part of data
-            rc = self.res_ok if self._rx_buffer.endswith(self.res_ok) else self.res_err
-            if (self.terminator in self._rx_buffer and self._rx_buffer.split(self.terminator)[-1] != rc):
-                return self._res_parsing
-        if self.verbose and self._autoconfig:
-            _log.warning('Clearing verbose flag due to short response: %s',
-                         dprint(self._rx_buffer))
-            self._config.verbose = False
-        if self._rx_buffer.endswith(self.res_ok):
-            return self._parsing_ok()
-        return self._parsing_error()
-    
-    def _parsing_ok(self) -> AtParsing:
-        """Determine next stage of parsing after good response"""
-        if vlog(VLOG_TAG):
-            _log.debug('Result OK for: %s', dprint(self._cmd_pending))
-        if not self.crc:
-            if 'CRC=1' in self._cmd_pending.upper() and self._autoconfig:
-                _log.debug('%s enabled CRC - set flag',
-                           dprint(self._cmd_pending))
-                self._config.crc = True
-                return AtParsing.CRC
-        else:
-            if ('CRC=0' in self._cmd_pending.upper() or
-                'ATZ' in self._cmd_pending.upper() and
-                not self._serial.in_waiting):
-                _log.debug('%s disabled CRC - reset flag',
-                           dprint(self._cmd_pending))
-                self._config.crc = False
             else:
-                return AtParsing.CRC
-        return AtParsing.OK
-    
-    def _parsing_error(self) -> AtParsing:
-        """Determine next stage of parsing after bad response"""
-        _log.warning('Result ERROR for: %s', dprint(self._cmd_pending))
-        if self.crc or self._serial.in_waiting > 0:
-            return AtParsing.CRC
-        return AtParsing.ERROR
+                self._cmd_error = AtErrorCode.PENDING
+        else:
+            with self._lock:
+                self.ready.clear()   # pause reading temporarily
+                self._lcmd_pending = at_command
+                at_response = self._get_at_response(response)
+                if at_response.info:
+                    reconstruct = at_response.info.replace('\n', '\r\n')
+                    advanced_errors = [
+                        AtErrorCode.CME_ERROR,
+                        AtErrorCode.CMS_ERROR,
+                    ]
+                    if at_response.result in advanced_errors:
+                        prefix = at_response.result.name.replace('_', ' ')
+                        reconstruct = f'+{prefix}: ' + reconstruct
+                    self._rx_buffer = f'\r\n{reconstruct}\r\n'
+                self._cmd_error = at_response.result
+                self._res_ready = len(at_response.info) > 0
+                if not self._res_ready:
+                    self._lcmd_pending = ''
+                self.ready.set()   # re-enable reading
+        return self._cmd_error
     
     def check_urc(self, **kwargs) -> bool:
         """Check for an unsolicited result code.
         
-        Call `get_response()` to retrieve the code if present.
-        
-        Args:
-            **read_until (str): Optional terminating string (default `<cr><lf>`)
-            **timeout (float): Maximum seconds to wait for completion if data
-            is found (default `AT_URC_TIMEOUT` 0.3 seconds)
-            **prefix (str): Optional expected prefix for a URC (default `+`)
-            **prefixes (list[str]): Optional multiple prefix options
-            **wait: Optional additional seconds to wait for the prefix
+        Call `get_response()` next to retrieve the code if present.
+        Backward compatible for legacy integrations.
         
         Returns:
-            True if a URC was found.
+            `True` if a URC was found.
         """
-        wait = kwargs.get('wait', 0)
-        assert isinstance(wait, int)
-        if wait == 0 and self._serial.in_waiting == 0:
+        if self._unsolicited_queue.qsize() == 0:
             return False
-        self.ready.wait()
-        self.ready.clear()
-        prefixes = kwargs.get('prefixes', ['+', '%'])
-        assert isinstance(prefixes, list)
-        assert all(isinstance(x, str) for x in prefixes)
-        prefix = kwargs.get('prefix')
-        if prefix and prefix not in prefixes:
-            prefixes.append(prefix)
-        read_until = kwargs.get('read_until', self.terminator)
-        timeout = kwargs.get('timeout', AT_URC_TIMEOUT)
-        timeout += wait
-        if vlog(VLOG_TAG):
-            _log.debug('Processing URC until %s or %d',
-                       dprint(read_until), timeout)
-        self._toggle_raw(True)
-        if len(self._rx_buffer) > 0:
-            _log.warning('Dumping Rx buffer: %s', dprint(self._rx_buffer))
-        self._rx_buffer = ''
-        urc_found = False
-        start_time = time.time()
-        while (time.time() - start_time) < timeout:
-            if not self._read_serial_char() and urc_found:
-                self._toggle_raw(False)
-                _log.warning('Bad serial byte while parsing URC')
-                self._cmd_error = AtErrorCode.ERR_BAD_BYTE
-                break
-            if not urc_found:
-                if self._last_char_read() in prefixes:
-                    prefix = self._last_char_read()
-                    urc_found = True
-                    if (not self._rx_buffer.startswith(self.terminator) and
-                        not self._rx_buffer.startswith(prefix)):
-                        self._toggle_raw(False)
-                        _log.warning('Dumping pre-URC data: %s',
-                                     dprint(self._rx_buffer))
-                        self._rx_buffer = prefix
-                        self._toggle_raw(True)
-            elif (len(self._rx_buffer) > len(read_until) and
-                  self._rx_buffer.endswith(read_until)):
-                self._res_ready = True
-                break
-        self._toggle_raw(False)
-        if not self._res_ready:
-            if len(self._rx_buffer) > 0:
-                _log.warning('URC timeout no prefix and/or terminator: %s',
-                             dprint(self._rx_buffer))
-            self._rx_buffer = ''
-        self.ready.set()
-        return self._res_ready
+        if self._res_ready:
+            return True
+        try:
+            self._rx_buffer = self._unsolicited_queue.get(block=False)
+            self._res_ready = True
+            return True
+        except Empty:
+            _log.error('Unexpected error getting unsolicited from queue')
+        return False
 
-    def _clean_response(self) -> None:
-        """Clean up the Rx buffer prior to retrieval."""
-        if len(self._rx_buffer) == 0:
-            _log.debug('No response to clean')
-            return
-        if self.crc:
-            crc_length = 1 + 4 + len(self.terminator)
-            self._rx_buffer = self._rx_buffer[:-crc_length]
-            if vlog(VLOG_TAG):
-                _log.debug('Removed CRC: %s', dprint(self._rx_buffer))
-        to_remove = self.vres_ok if self.verbose else self.res_ok
-        self._rx_buffer = self._rx_buffer.replace(to_remove, '')
-        if vlog(VLOG_TAG):
-            _log.debug('Removed result code (%s): %s',
-                        dprint(to_remove), dprint(self._rx_buffer))
-        self._rx_buffer = self._rx_buffer.strip()
-        if vlog(VLOG_TAG):
-            _log.debug('Trimmed leading/trailing whitespace: %s',
-                        dprint(self._rx_buffer))
-        self._rx_buffer = self._rx_buffer.replace('\r\n', '\n')
-        self._rx_buffer = self._rx_buffer.replace('\n\n', '\n')
-        if vlog(VLOG_TAG):
-            _log.debug('Consolidated line feeds: %s', dprint(self._rx_buffer))
-    
     def get_response(self, prefix: str = '', clean: bool = True) -> str:
         """Retrieve the response (or URC) from the Rx buffer and clear it.
+        
+        Backward compatible for legacy integrations.
         
         Args:
             prefix: If specified removes the first instance of the string
             clean: If False include all non-printable characters
+        
+        Returns:
+            Information response or URC from the buffer.
         """
+        res = self._rx_buffer
         if prefix:
-            self._rx_buffer = self._rx_buffer.replace(prefix, '', 1)
+            if not res.strip().startswith(prefix) and prefix in res:
+                lines = [l.strip() for l in res.split(self.trailer_result) if l]
+                while not lines[0].startswith(prefix):
+                    urc = f'{self.header}{lines.pop(0)}{self.trailer_result}'
+                    self._unsolicited_queue.put(urc)
+                    _log.warning('Found pre-response URC: %s', dprint(urc))
+                res = f'{self.header}{(self.trailer_info).join(lines)}{self.trailer_result}'
+            elif not res.strip().startswith(prefix):
+                _log.warning('Prefix %s not found', prefix)
+            res = res.replace(prefix, '', 1)
             if vlog(VLOG_TAG):
                 _log.debug('Removed prefix (%s): %s',
-                            dprint(prefix), dprint(self._rx_buffer))
+                           dprint(prefix), dprint(res))
         if clean:
-            self._clean_response()
-        tmp = self._rx_buffer
+            res = res.strip().replace('\r\n', '\n')
+            if res.startswith(('+CME', '+CMS')):
+                res = res.split(': ', 1)[1]
         self._rx_buffer = ''
+        if self._lcmd_pending:
+            self._lcmd_pending = ''
         self._res_ready = False
-        return tmp
+        return res
     
     def is_response_ready(self) -> bool:
-        """Check if a response is waiting to be retrieved."""
+        """Check if a response is waiting to be retrieved.
+        
+        Backward compatible for legacy integrations.
+        """
         return self._res_ready
     
     def last_error_code(self, clear: bool = False) -> 'AtErrorCode|None':
-        """Get the last error code"""
+        """Get the last error code.
+        
+        Backward compatible for legacy integrations.
+        """
         tmp = self._cmd_error
         if clear:
             self._cmd_error = None
         return tmp
-    

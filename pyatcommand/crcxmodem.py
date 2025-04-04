@@ -18,7 +18,7 @@ _crc_table_is_initialized: bool = False
 
 
 def apply_crc(at_command: str, sep: str = CRC_SEP) -> str:
-    """Applies a CRC-16-CCITT checksum to the at_command."""
+    """Applies a CRC-16-CCITT checksum to the AT command."""
     crc = _calculate_crc(at_command)
     hex_crc = f'{crc:04X}'
     if vlog(VLOG_TAG):
@@ -72,6 +72,7 @@ def _update_crc(crc: int, c: int) -> int:
     crc = (crc << 8) ^ _crcxmodem_table[tmp & 0xFF]
     crc = crc & 0xFFFF
     return crc
+
 
 def _calculate_crc(string: str, initial_value: int = 0xFFFF) -> int:
     """Calculates the CRC of a string."""

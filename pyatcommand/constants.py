@@ -25,6 +25,8 @@ class AtErrorCode(IntEnum):
     ERR_BAD_BYTE = 255
     ERR_CRC_CONFIG = 254
     PENDING = 253
+    CME_ERROR = 252
+    CMS_ERROR = 251
 
 
 class AtParsing(IntEnum):
