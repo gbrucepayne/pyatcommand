@@ -12,7 +12,8 @@ i.e. originating commands and would implement the **`AtClient`**.
 Data Communications Equipment **DCE** refers to the modem responding to commands
 or emitting unsolicited information and would implement the **`AtServer`**.
 
-Use of Verbose mode (`ATV1`) is generally recommended to disambiguate responses, errors and URCs.
+Use of Verbose mode (`ATV1`) is generally recommended to disambiguate responses, 
+errors and URCs.
 
 Use of Echo (`ATE1`) is generally recommended to disambiguate responses from
 URCs.
@@ -50,7 +51,8 @@ for `echo` and `verbose`.
 
 This is the main mode of intended use. The logic flow is as follows:
 
-An AT commmand, with optional timeout, is submitted by calling `send_command()`:
+An AT commmand, with optional timeout, is submitted by calling `send_command()`
+which blocks until either a response is received or a timeout expires:
 * Uses a `threading.Lock` to ensure thread safety;
 * Clears the last error code;
 * Clears the response buffer;
@@ -70,6 +72,8 @@ An AT commmand, with optional timeout, is submitted by calling `send_command()`:
     Any CME/CMS ERROR results will be placed in `info` when `ok` is `False`
     * `crc_ok` (`bool` or `None`) If CRC feature is supported, indicates if
     the response had a valid CRC.
+* Alterntively to the `AtResponse` object, you can pass kwarg `raw=True` to
+receive the complete response as an ASCII string.
 
 ### Unsolicited Response Codes (URC)
 
