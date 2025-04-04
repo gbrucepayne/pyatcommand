@@ -90,6 +90,7 @@ class AtClient:
         self._cmd_error: 'AtErrorCode|None' = None
         self.ready = threading.Event()
         self.ready.set()
+        self.allow_unprintable_ascii: bool = False
 
     @property
     def echo(self) -> bool:
@@ -573,7 +574,8 @@ class AtClient:
             if vlog(VLOG_TAG + 'dev') and size > 1:
                 _log.debug('Read %d-byte chunk', len(data))
             for i, c in enumerate(data):
-                if not printable_char(c, self._is_debugging_raw):
+                if (not printable_char(c, self._is_debugging_raw)
+                    and self.allow_unprintable_ascii is not True):
                     err_msg = f'Unprintable byte {hex(c)}'
                     raise AtDecodeError(err_msg)
             chunk = data.decode('ascii')

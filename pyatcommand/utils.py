@@ -62,6 +62,12 @@ def dprint(printable: str) -> str:
     """Get a printable string on a single line."""
     for k in _dprint_map:
         printable = printable.replace(k, _dprint_map[k])
+    unstrippable = []   # display unprintable ASCII
+    for c in printable:
+        if ord(c) <= 31 or ord(c) >= 127 and c not in unstrippable:
+            unstrippable.append()
+    for c in unstrippable:
+        printable = printable.replace(c, f'\\{hex(ord(c))[1:]}')
     return printable
 
 
