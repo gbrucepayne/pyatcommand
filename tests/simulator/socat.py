@@ -16,6 +16,7 @@ import time
 import atexit
 import string
 import re
+import random
 
 import serial
 from serial.tools.list_ports import comports
@@ -165,11 +166,14 @@ class ModemSimulator:
                         continue
                     _log.debug('Processing command: %s', _debugf(self._request))
                     response = ''
-                    if self._request.lower().startswith('ATE'):
+                    if self._request.upper() == 'AT':
+                        response = VRES_OK if self.verbose else RES_OK
+                    elif self._request.upper().startswith('ATE'):
                         self.echo = self._request.endswith('1')
                         response = VRES_OK if self.verbose else RES_OK
-                    elif self._request.lower().startswith('ATV'):
+                    elif self._request.upper().startswith('ATV'):
                         self.verbose = self._request.endswith('1')
+                        _log.debug('Verbose %sabled', 'en' if self.verbose else 'dis')
                         response = VRES_OK if self.verbose else RES_OK
                     elif self.commands and self._request in self.commands:
                         _log.debug('Processing custom response')
@@ -183,8 +187,6 @@ class ModemSimulator:
                                 time.sleep(res_meta['delay'])
                     elif self._request in self.default_ok:
                         response = VRES_OK if self.verbose else RES_OK
-                    elif 'BAD_BYTE' in self._request:
-                        self._ser.write(bytes([255]))
                     else:
                         _log.error('Unsupported command: %s', self._request)
                         response = VRES_ERR if self.verbose else RES_ERR
@@ -192,10 +194,22 @@ class ModemSimulator:
                         if not self.verbose:
                             pattern = r'\r\n.*?\r\n'
                             lines = re.findall(pattern, response, re.DOTALL)
-                            lines[-1] = lines[-1].strip() + '\r'
-                        _log.debug('Sending %s response: %s',
-                                   _debugf(self._request), _debugf(response))
-                        self._ser.write(response.encode())
+                            if lines:
+                                for i, line in enumerate(lines):
+                                    lines[i] = line.replace('\r\n', '', 1)
+                                    if i == len(lines) - 1:
+                                        lines[i] = RES_OK if 'OK' in line else RES_ERR
+                                response = ''.join(lines)
+                        to_write = response.encode()
+                        if 'BAD_BYTE' in self._request:
+                            bad_byte = 0xFF
+                            to_write = bytearray(to_write)
+                            bad_byte_offset = random.randint(0, len(to_write))
+                            to_write.insert(bad_byte_offset, bad_byte)
+                        _log.debug('Sending response to %s: %s',
+                                   _debugf(self._request),
+                                   _debugf(to_write.decode(errors='backslashreplace')))
+                        self._ser.write(to_write)
                     self._request = ''
                 except (UnicodeDecodeError, UnprintableException):
                     _log.error('Bad byte received [%d] - clearing buffer\n',
