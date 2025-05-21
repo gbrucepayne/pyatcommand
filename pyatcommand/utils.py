@@ -65,7 +65,7 @@ def dprint(printable: str) -> str:
     unstrippable = []   # display unprintable ASCII
     for c in printable:
         if ord(c) <= 31 or ord(c) >= 127 and c not in unstrippable:
-            unstrippable.append()
+            unstrippable.append(c)
     for c in unstrippable:
         printable = printable.replace(c, f'\\{hex(ord(c))[1:]}')
     return printable
