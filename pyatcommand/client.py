@@ -6,7 +6,6 @@ import os
 import threading
 import time
 from queue import Queue, Empty
-from warnings import warn
 
 import serial
 from dotenv import load_dotenv
@@ -628,7 +627,7 @@ class AtClient:
                     if (vline.endswith((trailer_info, trailer_result)) and
                         not vline.startswith(header) and
                         not _is_crc(vline)):
-                        if warnings:
+                        if warnings or vlog(VLOG_TAG + 'dev'):
                             _log.warning('Fixed missing header on %s',
                                          dprint(vline.decode(errors='replace')))
                         vline = header + vline
@@ -645,7 +644,7 @@ class AtClient:
                     if not line.endswith(trailer_result):
                         if (line.endswith((b'0', b'4')) or
                             line.startswith(cmx_error_prefixes)):
-                            if warnings:
+                            if warnings or vlog(VLOG_TAG + 'dev'):
                                 _log.warning('Fixed missing V0 trailer on %s',
                                              dprint(line.decode(errors='replace')))
                             line = line + trailer_result
@@ -658,7 +657,7 @@ class AtClient:
                             split_index = line.find(b'+')
                             prev_line = line[:split_index]
                             line = line[split_index:]
-                        if warnings:
+                        if warnings or vlog(VLOG_TAG + 'dev'):
                             _log.warning('Fixed missing V0 info trailer on %s',
                                          dprint(prev_line.decode(errors='replace')))
                         lines.insert(i, prev_line + trailer_info)
@@ -752,7 +751,7 @@ class AtClient:
         def _complete_parsing(buf: bytearray) -> bytearray:
             """Complete the parsing of a response or unsolicited"""
             self._toggle_raw(False)
-            lines = _at_splitlines(buf, warnings=True)
+            lines = _at_splitlines(buf, warnings=vlog(VLOG_TAG))
             buf = bytearray().join(lines)
             if (self._cmd_pending and
                 (_is_response(buf, self.verbose) or _is_crc(buf))):
