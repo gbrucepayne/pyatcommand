@@ -48,7 +48,6 @@ class MockSerial:
             for byte in self._response:
                 self._read_buffer.put(byte)
             self._response = b''
-                    
     
     def read(self, size=1) -> bytes:
         """Simulate reading data from serial interface."""
@@ -58,6 +57,25 @@ class MockSerial:
                 if not self._read_buffer.empty():
                     result += bytes([self._read_buffer.get()])
         return result
+    
+    def read_until(self, expected=b'\n', size=None) -> bytes:
+        """Simulate serial.read_until"""
+        result = bytearray()
+        expected_len = len(expected)
+        deadline = time.time() + self.timeout if self.timeout else None
+        while True:
+            if self._read_buffer.empty():
+                if self.timeout:
+                    if time.time() >= deadline:
+                        break
+                time.sleep(0.01)
+                continue
+            result.append(self._read_buffer.get())
+            if size and len(result) >= size:
+                break
+            if result[-expected_len:] == expected:
+                break
+        return bytes(result)
     
     @property
     def in_waiting(self) -> int:
@@ -238,13 +256,14 @@ def test_send_command(bridge, simulator, cclient: AtClient):
     assert at_response.info == 'Simulated Modems Inc'
 
 
-def test_non_verbose(bridge, simulator: ModemSimulator, client: AtClient):
+def test_non_verbose(bridge, simulator: ModemSimulator, cclient: AtClient):
     """Test responses with V0"""
-    client.connect(port=DTE, retry_timeout=5, verbose=False)
-    at_response = client.send_command('AT+GMI')
-    assert at_response.ok
+    v0_response = cclient.send_command('ATV0')
+    assert v0_response.ok is True
+    assert cclient.verbose is False
+    at_response = cclient.send_command('AT+GMI')
+    assert at_response.ok is True
     assert isinstance(at_response.info, str) and len(at_response.info) > 0
-    client.disconnect()
 
 
 def test_send_command_crc(bridge, simulator, cclient: AtClient):
@@ -417,9 +436,12 @@ def test_timeout(bridge, simulator, cclient: AtClient):
     assert at_response.ok
 
 
-def test_bad_byte(bridge, simulator, cclient: AtClient):
-    with pytest.raises(AtDecodeError):
-        cclient.send_command('AT!BAD_BYTE?', timeout=2)
+def test_bad_byte(bridge, simulator, cclient: AtClient, caplog):
+    # with caplog.at_level(logging.WARNING):
+    # with pytest.raises(AtDecodeError):
+    res = cclient.send_command('AT!BAD_BYTE?', timeout=2)
+    assert res.ok is True
+    assert any('invalid char' in message.lower() for message in caplog.messages)
 
 
 def test_response_plus_urc(bridge, simulator, cclient: AtClient):
@@ -439,6 +461,12 @@ def test_noncompliant_response(bridge, simulator, cclient: AtClient, log_verbose
     at_response = cclient.send_command('AT!NONCOMPLY?')
     assert at_response.ok is True
     assert len(at_response.info) > 0
+    assert at_response.info == 'Missing trailer'
+    at_response = cclient.send_command('ATV0', timeout=30)
+    assert cclient.verbose is False
+    at_response = cclient.send_command('AT!V0NONCOMPLY?', timeout=30)
+    assert at_response.ok is True
+    assert at_response.info == 'Missing trailer'
 
 
 def test_urc_echo_race(bridge, simulator, cclient: AtClient, log_verbose):
