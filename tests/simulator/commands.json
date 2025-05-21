@@ -16,8 +16,10 @@
     "AT+CGDCONT?": {"response": "\r\n+CGDCONT: 0,0\r\n\r\nOK\r\n", "delay": 0},
     "AT+GDELAY?": {"response": "\r\n+GDELAY: \"true\"\r\n\r\nOK\r\n", "delay": 2},
     "AT!TIMEOUT?": {"response": "\r\nOK\r\n", "delay": 3},
+    "AT!BAD_BYTE?": {"response": "\r\nOK\r\n"},
     "AT!MUDDLE?": {"response": "\r\nOK\r\n\r\n+URC: something\r\n"},
     "AT!NONCOMPLY?": {"response": "\r\nMissing trailer\r\nOK\r\n"},
+    "AT!V0NONCOMPLY?": {"response": "Missing trailer0\r"},
     "AT!ECHORACE?": {"response": "\r\n+URC: event data\r\nAT!ECHORACE?\r\r\n!ECHORACE: info\r\n\r\nOK\r\n"},
     "AT!RESURCRACE?": {"response": "AT!RESURCRACE?\r\r\n+URC: event data\r\n\r\n!RESURCRACE: response 1\r\nresponse 2\r\n\r\nOK\r\n"}
 }
