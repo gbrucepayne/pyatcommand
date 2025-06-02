@@ -1,20 +1,23 @@
+"""Unit test cases for AtClient."""
 import logging
 import os
-import pytest
 import queue
 import random
 import threading
 import time
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, patch  # noqa: F401
 
-from serial.tools.list_ports import comports
+import pytest
 
-from pyatcommand import AtClient, AtErrorCode, AtTimeout, AtCrcConfigError, AtDecodeError
-from .simulator.socat import SerialBridge, ModemSimulator, DTE, COMMAND_FILE
+from pyatcommand import AtErrorCode, AtTimeout
+from pyatcommand.client import AtClient
+from pyatcommand.common import list_available_serial_ports
+
+from .simulator.socat import COMMAND_FILE, DTE, ModemSimulator, SerialBridge
 
 logger = logging.getLogger(__name__)
 
-REAL_UART = os.getenv('REAL_UART', '/dev/ttyUSB0')
+REAL_UART = os.getenv('REAL_UART')
 
 
 @pytest.fixture
@@ -89,6 +92,9 @@ class MockSerial:
         """Simulate closing the port."""
         self.is_open = False
     
+    def reset_output_buffer(self):
+        """Simulate clearing the Tx buffer."""
+    
     def reset_buffers(self):
         """Clear the simulated buffers"""
         with self._lock:
@@ -136,34 +142,37 @@ def simulator():
     simulator.stop()
 
 
-def test_connect_invalid_port(client: AtClient):
-    with pytest.raises(ConnectionError):
-        client.connect(port='COM99')
-
-
-def test_connect_no_response(client: AtClient):
-    with pytest.raises(ConnectionError):
-        client.connect(retry_timeout=2)
-
-
 def test_connect(log_verbose, bridge: SerialBridge, simulator: ModemSimulator, client: AtClient):
-    client.connect(port=DTE, retry_timeout=2, ati=True)
+    client.connect(port=DTE, retry_timeout=2)
     assert client.is_connected()
     client.disconnect()
 
 
-def test_ati_log_output(caplog, bridge, simulator, client: AtClient):
-    """"""
-    caplog.set_level(logging.INFO)
-    client.connect(port=DTE, ati=True)
-    assert "First line" in caplog.text
-    client.disconnect()
+def test_connect_no_port(client: AtClient):
+    with pytest.raises(ConnectionError) as excinfo:
+        client.connect()
+    assert 'invalid or missing' in str(excinfo.value).lower()
 
 
-@pytest.mark.skipif(not any(port.device == REAL_UART for port in comports()),
+def test_connect_invalid_port(client: AtClient):
+    with pytest.raises(ConnectionError) as excinfo:
+        client.connect(port='COM99')
+    assert 'unable to open' in str(excinfo.value).lower()
+
+
+def test_connect_no_response(bridge, client: AtClient):
+    with pytest.raises(ConnectionError) as excinfo:
+        client.connect(port=DTE, retry_timeout=2)
+    assert 'timed out' in str(excinfo.value).lower()
+
+
+@pytest.mark.skipif(not any(port == REAL_UART for port in list_available_serial_ports()),
                     reason = f'{REAL_UART} not available')
 def test_autobaud(log_verbose):
-    """Testing autobaud requires use of a physical serial port."""
+    """Testing autobaud requires use of a physical serial port.
+    
+    Simulated DTE does not care about baud rate of pyserial.
+    """
     real_uart = REAL_UART
     unlikely_baud = 2400
     client = AtClient()
@@ -174,80 +183,6 @@ def test_autobaud(log_verbose):
     assert client.is_connected() is True
     assert client.baudrate != unlikely_baud
     client.disconnect()
-
-
-def test_legacy_response(bridge: SerialBridge, simulator: ModemSimulator, cclient: AtClient):
-    assert cclient.send_at_command('AT+GMI', timeout=3) == AtErrorCode.OK
-    response = cclient.get_response()
-    assert response == 'Simulated Modems Inc'
-    assert cclient.send_at_command('ATI') == AtErrorCode.OK
-    response = cclient.get_response()
-    assert response == 'First line\nSecond line'
-    assert cclient.send_at_command('AT') == AtErrorCode.OK
-    response = cclient.get_response()
-    assert response == ''
-
-
-def test_legacy_response_prefix(bridge: SerialBridge, simulator: ModemSimulator, cclient: AtClient):
-    assert cclient.send_at_command('AT+CGDCONT?', timeout=3) == AtErrorCode.OK
-    response = cclient.get_response('+CGDCONT:')
-    assert isinstance(response, str) and len(response) > 0 and '+CGDCONT' not in response
-
-
-def test_legacy_check_urc(bridge, simulator: ModemSimulator, cclient: AtClient):
-    urc = '+URC: Test'
-    simulator.inject_urc(urc)
-    received = False
-    start_time = time.time()
-    while not received and time.time() - start_time < 10:
-        received = cclient.check_urc()
-        if not received:
-            time.sleep(0.1)
-    if received:
-        logger.info('URC latency %0.1f seconds', time.time() - start_time)
-    assert received is True
-    assert cclient.get_response() == urc
-
-    
-def test_legacy_then_urc(bridge, simulator: ModemSimulator, cclient: AtClient):
-    urc = '+URC: Test'
-    assert cclient.send_at_command('AT+GMI', timeout=3) == AtErrorCode.OK
-    assert cclient.is_response_ready() is True
-    response = cclient.get_response()
-    assert cclient.is_response_ready() is False
-    assert response == 'Simulated Modems Inc'
-    assert cclient.ready.is_set()
-    simulator.inject_urc(urc)
-    received = False
-    start_time = time.time()
-    while not received and time.time() - start_time < 10:
-        received = cclient.check_urc()
-        if not received:
-            time.sleep(0.1)
-    if received:
-        logger.info('URC latency %0.1f seconds', time.time() - start_time)
-    assert received is True
-    assert cclient.is_response_ready() is True
-    assert cclient.get_response() == urc
-    assert cclient.is_response_ready() is False
-    assert cclient.send_at_command('AT+GMI', timeout=3) == AtErrorCode.OK
-    response = cclient.get_response()
-    assert response == 'Simulated Modems Inc'
-    # send command without information response
-    assert cclient.send_at_command('ATZ') == AtErrorCode.OK
-    assert cclient.is_response_ready() == False
-    simulator.inject_urc(urc)
-    received = False
-    start_time = time.time()
-    while not received and time.time() - start_time < 10:
-        received = cclient.check_urc()
-        if not received:
-            time.sleep(0.1)
-    if received:
-        logger.info('URC latency %0.1f seconds', time.time() - start_time)
-    assert received is True
-    assert cclient.is_response_ready() is True
-    assert cclient.get_response() == urc
 
 
 def test_send_command(bridge, simulator, cclient: AtClient):
@@ -416,23 +351,16 @@ def test_cme_error(bridge, simulator: ModemSimulator, cclient: AtClient):
     assert at_response.info == 'invalid configuration'
 
 
-def test_legacy_cme_error(bridge, simulator: ModemSimulator, cclient: AtClient, log_verbose):
-    assert cclient.send_at_command('AT+CMEE=4') == AtErrorCode.CME_ERROR
-    assert cclient.is_response_ready() is True
-    res = cclient.get_response()
-    assert res == 'invalid configuration'
-    cclient.send_at_command('AT+CMEE=4')
-    raw = cclient.get_response(clean=False)
-    assert raw == '\r\n+CME ERROR: invalid configuration\r\n'
-
-
 def test_timeout(bridge, simulator, cclient: AtClient):
+    timeout_cmd = 'AT!TIMEOUT?'
+    delay = 3
     timeout = 1
     start_time = time.time()
     with pytest.raises(AtTimeout):
-        cclient.send_command('AT!TIMEOUT?', timeout=timeout)
+        cclient.send_command(timeout_cmd, timeout=timeout)
     assert int(time.time() - start_time) == timeout
-    at_response = cclient.send_command('AT', timeout=3)
+    time.sleep(delay)
+    at_response = cclient.send_command(timeout_cmd, timeout=delay+0.5)
     assert at_response.ok
 
 
@@ -484,6 +412,95 @@ def test_urc_response_race(bridge, simulator, cclient: AtClient, log_verbose):
     assert at_response.ok is True
     urc = cclient.get_urc()
     assert urc is not None
+
+
+def test_legacy_response(bridge: SerialBridge, simulator: ModemSimulator, cclient: AtClient):
+    assert cclient.send_at_command('AT+GMI', timeout=3) == AtErrorCode.OK
+    response = cclient.get_response()
+    assert response == 'Simulated Modems Inc'
+    assert cclient.send_at_command('ATI') == AtErrorCode.OK
+    response = cclient.get_response()
+    assert response == 'First line\nSecond line'
+    assert cclient.send_at_command('AT') == AtErrorCode.OK
+    response = cclient.get_response()
+    assert response == ''
+
+
+def test_legacy_response_prefix(bridge: SerialBridge, simulator: ModemSimulator, cclient: AtClient):
+    assert cclient.send_at_command('AT+CGDCONT?', timeout=3) == AtErrorCode.OK
+    response = cclient.get_response('+CGDCONT:')
+    assert isinstance(response, str) and len(response) > 0 and '+CGDCONT' not in response
+
+
+def test_legacy_check_urc(bridge, simulator: ModemSimulator, cclient: AtClient):
+    urc = '+URC: Test'
+    simulator.inject_urc(urc)
+    received = False
+    start_time = time.time()
+    while not received and time.time() - start_time < 10:
+        received = cclient.check_urc()
+        if not received:
+            time.sleep(0.1)
+    if received:
+        logger.info('URC latency %0.1f seconds', time.time() - start_time)
+    assert received is True
+    assert cclient.get_response() == urc
+
+    
+def test_legacy_then_urc(bridge, simulator: ModemSimulator, cclient: AtClient):
+    urc = '+URC: Test'
+    assert cclient.send_at_command('AT+GMI', timeout=3) == AtErrorCode.OK
+    assert cclient.is_response_ready() is True
+    response = cclient.get_response()
+    assert cclient.is_response_ready() is False
+    assert response == 'Simulated Modems Inc'
+    assert cclient._rx_ready.is_set()
+    simulator.inject_urc(urc)
+    received = False
+    start_time = time.time()
+    while not received and time.time() - start_time < 10:
+        received = cclient.check_urc()
+        if not received:
+            time.sleep(0.1)
+    if received:
+        logger.info('URC latency %0.1f seconds', time.time() - start_time)
+    assert received is True
+    assert cclient.is_response_ready() is True
+    assert cclient.get_response() == urc
+    assert cclient.is_response_ready() is False
+    assert cclient.send_at_command('AT+GMI', timeout=3) == AtErrorCode.OK
+    response = cclient.get_response()
+    assert response == 'Simulated Modems Inc'
+    # send command without information response
+    assert cclient.send_at_command('ATZ') == AtErrorCode.OK
+    assert cclient.is_response_ready() is False
+    simulator.inject_urc(urc)
+    received = False
+    start_time = time.time()
+    while not received and time.time() - start_time < 10:
+        received = cclient.check_urc()
+        if not received:
+            time.sleep(0.1)
+    if received:
+        logger.info('URC latency %0.1f seconds', time.time() - start_time)
+    assert received is True
+    assert cclient.is_response_ready() is True
+    assert cclient.get_response() == urc
+
+
+def test_legacy_cme_error(bridge, simulator: ModemSimulator, cclient: AtClient, log_verbose):
+    assert cclient.send_at_command('AT+CMEE=4') == AtErrorCode.CME_ERROR
+    assert cclient.is_response_ready() is True
+    res = cclient.get_response()
+    assert res == 'invalid configuration'
+    cclient.send_at_command('AT+CMEE=4')
+    raw = cclient.get_response(clean=False)
+    assert raw == '\r\n+CME ERROR: invalid configuration\r\n'
+
+
+def test_legacy_urc_response_race(bridge, simulator, cclient: AtClient, log_verbose):
+    """Case when URC arrives after command but before response."""
+    # Seen on Murata/Sony with +CEREG output between command and response
     assert cclient.send_at_command('AT!RESURCRACE?') == AtErrorCode.OK
     response = cclient.get_response('!RESURCRACE:')
     assert len(response) > 0
