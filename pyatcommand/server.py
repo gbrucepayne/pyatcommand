@@ -8,9 +8,8 @@ from typing import Callable
 
 from serial import Serial
 
-from .constants import AtErrorCode, AtParsing
+from .common import AtConfig, AtErrorCode
 from .exception import AtCommandUnknown
-from .utils import AtConfig
 
 _log = logging.getLogger(__name__)
 
@@ -51,7 +50,7 @@ class AtServer:
         self._lock = threading.Lock()
         self._rx_buffer: str = ''
         self._tx_buffer: str = ''
-        self._parsing: AtParsing = AtParsing.NONE
+        # self._parsing: AtParsing = AtParsing.NONE
         self._cme_error_level: int = 0
         self._last_error: 'AtErrorCode|str|None' = None
         self._commands: 'dict[str, AtCommand]' = {}
