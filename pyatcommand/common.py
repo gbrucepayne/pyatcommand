@@ -72,17 +72,19 @@ class AtResponse:
         elapsed (float): Seconds elapsed between command and response.
         ok (bool): Flag indicating if the result code was a success.
     """
-    __slots__ = ('result', 'info', 'crc_ok', 'elapsed')
+    __slots__ = ('result', 'info', 'crc_ok', 'elapsed', 'raw')
     
     def __init__(self,
                  result: Optional[AtErrorCode] = None,
                  info: Optional[str] = None,
                  crc_ok: Optional[bool] = None,
-                 elapsed: Optional[float] = None):
+                 elapsed: Optional[float] = None,
+                 raw: Optional[str] = None):
         self.result: Optional[AtErrorCode] = result
         self.info: Optional[str] = info
         self.crc_ok: Optional[bool] = crc_ok
         self.elapsed: Optional[float] = elapsed
+        self.raw: Optional[str] = raw
     
     @property
     def ok(self) -> bool:
