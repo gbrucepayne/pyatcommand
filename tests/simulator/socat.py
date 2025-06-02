@@ -157,7 +157,7 @@ class ModemSimulator:
                 b = self._ser.read()
                 try:
                     c = b.decode()
-                    if not(c in string.printable):
+                    if c not in string.printable:
                         raise UnprintableException
                     if self.echo:
                         self._ser.write(b)
@@ -181,10 +181,12 @@ class ModemSimulator:
                         if isinstance(res_meta, str):
                             response = res_meta
                         elif 'response' in res_meta:
-                            response = res_meta['response']
-                            if ('delay' in res_meta and
-                                isinstance(res_meta['delay'], (float, int))):
-                                time.sleep(res_meta['delay'])
+                            response = res_meta.get('response')
+                            delay = res_meta.get('delay')
+                            if isinstance(delay, (float, int)):
+                                _log.debug('Delaying response %0.1f seconds',
+                                           delay)
+                                time.sleep(delay)
                     elif self._request in self.default_ok:
                         response = VRES_OK if self.verbose else RES_OK
                     else:
