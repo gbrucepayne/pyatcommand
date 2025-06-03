@@ -6,7 +6,7 @@ import os
 import threading
 import time
 from queue import Empty, Queue
-from typing import Optional, Union
+from typing import Optional
 
 import serial
 from dotenv import load_dotenv
