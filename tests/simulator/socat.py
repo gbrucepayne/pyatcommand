@@ -159,13 +159,15 @@ class ModemSimulator:
                     c = b.decode()
                     if c not in string.printable:
                         raise UnprintableException
-                    if self.echo:
-                        self._ser.write(b)
+                    # if self.echo:
+                    #     self._ser.write(b)
                     if c != self.terminator:
                         self._request += c
                         continue
                     _log.debug('Processing command: %s', _debugf(self._request))
+                    echo = self._request + self.terminator if self.echo else ''
                     response = ''
+                    delay = 0
                     if self._request.upper() == 'AT':
                         response = VRES_OK if self.verbose else RES_OK
                     elif self._request.upper().startswith('ATE'):
@@ -181,18 +183,21 @@ class ModemSimulator:
                         if isinstance(res_meta, str):
                             response = res_meta
                         elif 'response' in res_meta:
-                            response = res_meta.get('response')
-                            delay = res_meta.get('delay')
-                            if isinstance(delay, (float, int)):
-                                _log.debug('Delaying response %0.1f seconds',
-                                           delay)
-                                time.sleep(delay)
+                            response: str = res_meta.get('response')
+                            if res_meta.get('hasEcho') is True:
+                                echo = ''
+                            delay = res_meta.get('delay') or delay
                     elif self._request in self.default_ok:
                         response = VRES_OK if self.verbose else RES_OK
                     else:
                         _log.error('Unsupported command: %s', self._request)
                         response = VRES_ERR if self.verbose else RES_ERR
+                    if echo:
+                        self._ser.write(echo.encode())
                     if response:
+                        if delay:
+                            _log.debug('Delaying response %0.1f seconds', delay)
+                            time.sleep(delay)                            
                         if not self.verbose:
                             pattern = r'\r\n.*?\r\n'
                             lines = re.findall(pattern, response, re.DOTALL)
