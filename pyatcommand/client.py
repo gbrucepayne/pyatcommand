@@ -49,47 +49,45 @@ class AtClient:
         self._supported_baudrates = [
             115200, 57600, 38400, 19200, 9600, 4800, 2400
         ]
-        self._port: Union[str, None] = kwargs.get('port',
-                                                  os.getenv('SERIAL_PORT'))
+        self._port: Optional[str] = kwargs.get('port', os.getenv('SERIAL_PORT'))
         self._baudrate: int = kwargs.get('baudrate',
                                          int(os.getenv('SERIAL_BAUD', '9600')))
         self._is_debugging_raw = False
         self._config: AtConfig = AtConfig()
-        self._serial: serial.Serial = None
-        self._rx_timeout: Union[float, None] = kwargs.get('timeout', 0)
+        self._autoconfig: bool = kwargs.get('autoconfig', True)
+        self._serial: Optional[serial.Serial] = None
+        self._rx_timeout: Optional[float] = kwargs.get('timeout', 0)
         self._lock = threading.Lock()
-        self._listener_thread: Union[threading.Thread, None] = None
+        self._listener_thread: Optional[threading.Thread] = None
         self._rx_running: bool = False
         self._rx_buf = bytearray()
         self._rx_peeked = bytearray()
-        self._response_queue = Queue()
-        self._unsolicited_queue = Queue()
-        self._exception_queue = Queue()
+        self._response_queue: Queue[str] = Queue()
+        self._unsolicited_queue: Queue[str] = Queue()
+        self._exception_queue: Queue[Exception] = Queue()
         self._wait_no_rx_data: float = 0.1
         self._cmd_pending: str = ''
         self._command_timeout = AT_TIMEOUT
-        command_timeout = kwargs.get('command_timeout')
-        if command_timeout:
-            self.command_timeout = command_timeout
+        if 'command_timeout' in kwargs:
+            self.command_timeout = kwargs.get('command_timeout')
         self._is_initialized: bool = False
         self._rx_ready = threading.Event()
         atexit.register(self.disconnect)
         # Optional CRC support
         self._crc_enable: str = ''
         self._crc_disable: str = ''
-        self.auto_crc: bool = kwargs.get('auto_crc', False)
-        if not isinstance(self.auto_crc, bool):
+        self._auto_crc: bool = kwargs.get('auto_crc', False)
+        if not isinstance(self._auto_crc, bool):
             raise ValueError('Invalid auto_crc setting')
         # legacy backward compatibility below
-        self._autoconfig: bool = kwargs.get('autoconfig', True)
-        self._rx_str: str = ''
-        self._lcmd_pending: str = ''
-        self._res_ready = False
-        self._cmd_error: 'AtErrorCode|None' = None
+        self._legacy_response: str = ''
+        self._legacy_response_ready = False
+        self._legacy_cmd_error: Optional[AtErrorCode] = None
+        # Advanced debug
         self.allow_unprintable_ascii: bool = False
 
     @property
-    def port(self) -> Union[str, None]:
+    def port(self) -> Optional[str]:
         return self._port
     
     @port.setter
@@ -116,7 +114,7 @@ class AtClient:
     
     @property
     def ready(self) -> bool:
-        return self._rx_ready.is_set()
+        return self._is_initialized and self._rx_ready.is_set()
     
     @property
     def echo(self) -> bool:
@@ -216,18 +214,18 @@ class AtClient:
         return '+CME ERROR:'
     
     @property
-    def res_V1(self) -> 'list[str]':
+    def res_V1(self) -> list[str]:
         """Get the set of verbose result codes compatible with startswith."""
         CRLF = f'{self._config.cr}{self._config.lf}'
         return [ f'{CRLF}OK{CRLF}', f'{CRLF}ERROR{CRLF}' ]
     
     @property
-    def res_V0(self) -> 'list[str]':
+    def res_V0(self) -> list[str]:
         """Get the set of non-verbose result codes."""
         return [ f'0{self._config.cr}', f'4{self._config.cr}' ]
     
     @property
-    def result_codes(self) -> 'list[str]':
+    def result_codes(self) -> list[str]:
         return self.res_V0 + self.res_V1
     
     @property
@@ -239,7 +237,7 @@ class AtClient:
         return self._command_timeout
     
     @command_timeout.setter
-    def command_timeout(self, value: 'float|None'):
+    def command_timeout(self, value: Optional[float]):
         if value is not None and not isinstance(value, (float, int)) or value < 0:
             raise ValueError('Invalid default command timeout')
         self._command_timeout = value
@@ -396,9 +394,9 @@ class AtClient:
     
     def send_command(self,
                      command: str,
-                     timeout: 'float|None' = AT_TIMEOUT,
+                     timeout: Optional[float] = AT_TIMEOUT,
                      prefix: str = '',
-                     **kwargs) -> 'AtResponse|str':
+                     **kwargs) -> AtResponse:
         """Send an AT command and get the response.
         
         Args:
@@ -421,7 +419,6 @@ class AtClient:
                 raise ValueError('Invalid command timeout')
         if timeout == AT_TIMEOUT and self._command_timeout != AT_TIMEOUT:
             timeout = self._command_timeout
-        raw = kwargs.get('raw', False)
         rx_ready_wait = kwargs.get('rx_wait_timeout', AT_TIMEOUT)
         if not isinstance(rx_ready_wait, (float, int)):
             raise ValueError('Invalid rx_ready_wait')
@@ -462,8 +459,6 @@ class AtClient:
                     elapsed = time.time() - start_time
                     _log.debug('Response to %s: %s',
                                 command, dprint(response))
-                    if raw:
-                        return response
                     return self._get_at_response(response, prefix, elapsed)
                 except Empty:
                     err_msg = f'Command timed out: {command} ({timeout} s)'
@@ -476,7 +471,7 @@ class AtClient:
         """Prepare the command before sending bytes."""
         stripped = cmd.rstrip()
         terminator = cmd[len(stripped):] or self.terminator
-        if self.crc and self.auto_crc:
+        if self.crc and self._auto_crc:
             cmd = apply_crc(cmd.rstrip())
         return cmd + terminator
     
@@ -485,14 +480,14 @@ class AtClient:
                          prefix: str = '',
                          elapsed: Optional[float] = None) -> AtResponse:
         """Convert a raw response to `AtResponse`"""
-        at_response = AtResponse(elapsed=elapsed)
+        at_response = AtResponse(elapsed=elapsed, raw=response)
         parts = [x for x in response.strip().split(self.trailer_info) if x]
         if not self._config.verbose:
             parts += parts.pop().split(self.trailer_result)
         if self._config.crc_sep in parts[-1]:
             _ = parts.pop()   # remove CRC
             at_response.crc_ok = validate_crc(response, self._config.crc_sep)
-        if not (self._cmd_pending or self._lcmd_pending):
+        if not self._cmd_pending:
             at_response.result = AtErrorCode.URC
             at_response.info = '\n'.join(parts)
         else:
@@ -508,7 +503,7 @@ class AtClient:
                     if result.startswith('+CMS'):
                         err_code = AtErrorCode.CMS_ERROR
                 at_response.result = err_code
-        if (self._cmd_pending or self._lcmd_pending) and len(parts) > 0:
+        if self._cmd_pending and len(parts) > 0:
             if prefix:
                 if (not parts[0].startswith(prefix) and
                     any(part.startswith(prefix) for part in parts)):
@@ -523,7 +518,7 @@ class AtClient:
             at_response.info = '\n'.join(parts)
         return at_response
     
-    def get_urc(self, timeout: 'float|None' = 0.1) -> 'str|None':
+    def get_urc(self, timeout: Optional[float] = 0.1) -> Optional[str]:
         """Retrieves an Unsolicited Result Code if present.
         
         Args:
@@ -575,7 +570,7 @@ class AtClient:
         res_V0 = [r.encode() for r in self.res_V0]
         cmx_error_prefixes = (b'+CME ERROR:', b'+CMS ERROR:')
         
-        def _at_splitlines(buffer: bytearray, warnings: bool = False) -> 'list[bytes]':
+        def _at_splitlines(buffer: bytearray, warnings: bool = False) -> list[bytes]:
             """Split a buffer into lines according to AT spec.
             
             V1 has headers `<cr><lf>` and trailers `<cr><lf>`.
@@ -593,7 +588,7 @@ class AtClient:
             header = self.header.encode()
             trailer_info = self.trailer_info.encode()
             trailer_result = self.trailer_result.encode()
-            lines: 'list[bytes]' = []
+            lines: list[bytes] = []
             start = 0
             i = 0
             while i < len(buffer):
@@ -624,7 +619,7 @@ class AtClient:
                     if (vline.endswith((trailer_info, trailer_result)) and
                         not vline.startswith(header) and
                         not _is_crc(vline)):
-                        if warnings or vlog(VLOG_TAG + 'dev'):
+                        if warnings:
                             _log.warning('Fixed missing header on %s',
                                          dprint(vline.decode(errors='replace')))
                         vline = header + vline
@@ -641,7 +636,7 @@ class AtClient:
                     if not line.endswith(trailer_result):
                         if (line.endswith((b'0', b'4')) or
                             line.startswith(cmx_error_prefixes)):
-                            if warnings or vlog(VLOG_TAG + 'dev'):
+                            if warnings:
                                 _log.warning('Fixed missing V0 trailer on %s',
                                              dprint(line.decode(errors='replace')))
                             line = line + trailer_result
@@ -654,7 +649,7 @@ class AtClient:
                             split_index = line.find(b'+')
                             prev_line = line[:split_index]
                             line = line[split_index:]
-                        if warnings or vlog(VLOG_TAG + 'dev'):
+                        if warnings:
                             _log.warning('Fixed missing V0 info trailer on %s',
                                          dprint(prev_line.decode(errors='replace')))
                         lines.insert(i, prev_line + trailer_info)
@@ -863,6 +858,7 @@ class AtClient:
                                     self._update_config('crc', True)
                                 else:
                                     _complete_parsing(buf)
+                        assert buf is not None
             except (AtDecodeError, serial.SerialException) as err:
                 buf.clear()
                 _log.error('%s: %s', err.__class__.__name__, str(err))
@@ -896,55 +892,31 @@ class AtClient:
         Returns:
             `AtErrorCode` indicating success (0) or failure
         """
-        response = self.send_command(at_command, timeout, raw=True)
-        if not response:
-            if timeout is not None:
-                self._cmd_error = AtErrorCode.ERR_TIMEOUT
-            else:
-                self._cmd_error = AtErrorCode.PENDING
-        else:
-            with self._lock:
-                self._rx_ready.clear()   # pause reading temporarily
-                self._lcmd_pending = at_command
-                at_response = self._get_at_response(response)
-                if at_response.info:
-                    reconstruct = at_response.info.replace('\n', '\r\n')
-                    advanced_errors = [
-                        AtErrorCode.CME_ERROR,
-                        AtErrorCode.CMS_ERROR,
-                    ]
-                    if at_response.result in advanced_errors:
-                        prefix = at_response.result.name.replace('_', ' ')
-                        reconstruct = f'+{prefix}: ' + reconstruct
-                    self._rx_str = f'\r\n{reconstruct}\r\n'
-                self._cmd_error = at_response.result
-                self._res_ready = at_response.info is not None
-                if not self._res_ready:
-                    self._lcmd_pending = ''
-                self._rx_ready.set()   # re-enable reading
-        return self._cmd_error
-    
-    def check_urc(self, **kwargs) -> bool:
-        """Check for an unsolicited result code.
-        
-        Call `get_response()` next to retrieve the code if present.
-        Backward compatible for legacy integrations.
-        
-        Returns:
-            `True` if a URC was found.
-        """
-        if self._unsolicited_queue.qsize() == 0:
-            return False
-        if self._res_ready:
-            return True
         try:
-            self._rx_str = self._unsolicited_queue.get(block=False)
-            self._res_ready = True
-            return True
-        except Empty:
-            _log.error('Unexpected error getting unsolicited from queue')
-        return False
-
+            response = self.send_command(at_command, timeout)
+            self._legacy_cmd_error = response.result
+            if response.info:
+                reconstruct = response.info.replace('\n', '\r\n')
+                if response.result in [AtErrorCode.CME_ERROR,
+                                       AtErrorCode.CMS_ERROR]:
+                    prefix = response.result.name.replace('_', ' ')
+                    reconstruct = f'+{prefix}: {reconstruct}'
+                if self.verbose:
+                    reconstruct = f'\r\n{reconstruct}'
+                reconstruct = f'{reconstruct}\r\n'
+                self._legacy_response = reconstruct
+                self._legacy_response_ready = True
+        except AtTimeout:
+            self._legacy_cmd_error = AtErrorCode.ERR_TIMEOUT
+        return self._legacy_cmd_error
+    
+    def is_response_ready(self) -> bool:
+        """Check if a response is waiting to be retrieved.
+        
+        Backward compatible for legacy integrations.
+        """
+        return self._legacy_response_ready
+    
     def get_response(self, prefix: str = '', clean: bool = True) -> str:
         """Retrieve the response (or URC) from the Rx buffer and clear it.
         
@@ -957,7 +929,7 @@ class AtClient:
         Returns:
             Information response or URC from the buffer.
         """
-        res = self._rx_str
+        res = self._legacy_response
         if prefix:
             if not res.strip().startswith(prefix) and prefix in res:
                 lines = [line.strip() 
@@ -977,27 +949,39 @@ class AtClient:
             res = res.strip().replace('\r\n', '\n')
             if res.startswith(('+CME', '+CMS')):
                 res = res.split(': ', 1)[1]
-        self._rx_str = ''
-        if self._lcmd_pending:
-            self._lcmd_pending = ''
-        self._res_ready = False
+        self._legacy_response = ''
+        self._legacy_response_ready = False
         return res
     
-    def is_response_ready(self) -> bool:
-        """Check if a response is waiting to be retrieved.
+    def check_urc(self, **kwargs) -> bool:
+        """Check for an unsolicited result code.
         
+        Call `get_response()` next to retrieve the code if present.
         Backward compatible for legacy integrations.
+        
+        Returns:
+            `True` if a URC was found.
         """
-        return self._res_ready
-    
+        if self._unsolicited_queue.qsize() == 0:
+            return False
+        if self._legacy_response_ready:
+            return True
+        try:
+            self._legacy_response = self._unsolicited_queue.get(block=False)
+            self._legacy_response_ready = True
+            return True
+        except Empty:
+            _log.error('Unexpected error getting unsolicited from queue')
+        return False
+
     def last_error_code(self, clear: bool = False) -> 'AtErrorCode|None':
         """Get the last error code.
         
         Backward compatible for legacy integrations.
         """
-        tmp = self._cmd_error
+        tmp = self._legacy_cmd_error
         if clear:
-            self._cmd_error = None
+            self._legacy_cmd_error = None
         return tmp
 
     #--- Raw debug mode for detailed interface analysis ---#

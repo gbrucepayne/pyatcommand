@@ -408,7 +408,7 @@ def test_urc_echo_race(bridge, simulator, cclient: AtClient, log_verbose):
 def test_urc_response_race(bridge, simulator, cclient: AtClient, log_verbose):
     """Case when URC arrives after command but before response."""
     # Seen on Murata/Sony with +CEREG output between command and response
-    at_response = cclient.send_command('AT!RESURCRACE?', prefix='!RESURCRACE:')
+    at_response = cclient.send_command('AT!RESURCRACE?', prefix='!RESURCRACE:', timeout=3)
     assert at_response.ok is True
     urc = cclient.get_urc()
     assert urc is not None
@@ -494,14 +494,13 @@ def test_legacy_cme_error(bridge, simulator: ModemSimulator, cclient: AtClient, 
     res = cclient.get_response()
     assert res == 'invalid configuration'
     cclient.send_at_command('AT+CMEE=4')
-    raw = cclient.get_response(clean=False)
-    assert raw == '\r\n+CME ERROR: invalid configuration\r\n'
+    assert cclient.get_response(clean=False) == '\r\n+CME ERROR: invalid configuration\r\n'
 
 
 def test_legacy_urc_response_race(bridge, simulator, cclient: AtClient, log_verbose):
     """Case when URC arrives after command but before response."""
     # Seen on Murata/Sony with +CEREG output between command and response
-    assert cclient.send_at_command('AT!RESURCRACE?') == AtErrorCode.OK
+    assert cclient.send_at_command('AT!RESURCRACE?', timeout=3) == AtErrorCode.OK
     response = cclient.get_response('!RESURCRACE:')
     assert len(response) > 0
     assert cclient.check_urc() is True
