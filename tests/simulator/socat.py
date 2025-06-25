@@ -96,7 +96,7 @@ class ModemSimulator:
     def __init__(self) -> None:
         self.echo: bool = True
         self.verbose: bool = True
-        self.terminator: bytes = '\r'
+        self.terminator: str = '\r'
         self.commands: 'dict[str, dict]' = {}
         self.default_ok: 'list[str]' = ['AT']
         self._running: bool = False
