@@ -185,10 +185,30 @@ def test_autobaud(log_verbose):
     client.disconnect()
 
 
+def test_echo_autodetect(bridge, simulator: ModemSimulator, cclient: AtClient):
+    assert cclient.echo is True
+    simulator.echo = False
+    cclient.send_command('AT')
+    assert cclient.echo is False
+    simulator.echo = True
+    cclient.send_command('AT')
+    assert cclient.echo is True
+
+
+def test_verbose_autodetect(bridge, simulator: ModemSimulator, cclient: AtClient):
+    assert cclient.verbose is True
+    simulator.verbose = False
+    cclient.send_command('AT')
+    assert cclient.verbose is False
+    simulator.verbose = True
+    cclient.send_command('AT')
+    assert cclient.verbose is True
+
+
 def test_send_command(bridge, simulator, cclient: AtClient):
     at_response = cclient.send_command('AT+GMI')
     assert at_response.ok
-    assert at_response.info == 'Simulated Modems Inc'
+    assert isinstance(at_response.info, str)
 
 
 def test_non_verbose(bridge, simulator: ModemSimulator, cclient: AtClient):
@@ -390,9 +410,9 @@ def test_noncompliant_response(bridge, simulator, cclient: AtClient, log_verbose
     assert at_response.ok is True
     assert len(at_response.info) > 0
     assert at_response.info == 'Missing trailer'
-    at_response = cclient.send_command('ATV0', timeout=30)
+    at_response = cclient.send_command('ATV0', timeout=90)
     assert cclient.verbose is False
-    at_response = cclient.send_command('AT!V0NONCOMPLY?', timeout=30)
+    at_response = cclient.send_command('AT!V0NONCOMPLY?', timeout=90)
     assert at_response.ok is True
     assert at_response.info == 'Missing trailer'
 

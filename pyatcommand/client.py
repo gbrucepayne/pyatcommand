@@ -173,11 +173,6 @@ class AtClient:
     
     @crc_sep.setter
     def crc_sep(self, value: str):
-        invalid_chars = ['=', '?', self._config.cr, self._config.lf,
-                         self._config.sep]
-        if (not isinstance(value, str) or len(value) != 1 or
-            value in invalid_chars):
-            raise ValueError('Invalid separator')
         self._config.crc_sep = value
         
     @property
@@ -186,27 +181,12 @@ class AtClient:
     
     @property
     def terminator(self) -> str:
-        """The command terminator character."""
-        return f'{self._config.cr}'
-        
-    @property
-    def header(self) -> str:
-        """The response header common to info and result code."""
-        if self._config.verbose:
-            return f'{self._config.cr}{self._config.lf}'
-        return ''
+        """The command terminator character(s)."""
+        return self._config.terminator
     
-    @property
-    def trailer_info(self) -> str:
-        """The trailer for information responses."""
-        return f'{self._config.cr}{self._config.lf}'
-    
-    @property
-    def trailer_result(self) -> str:
-        """The trailer for the result code."""
-        if self._config.verbose:
-            return f'{self._config.cr}{self._config.lf}'
-        return self._config.cr
+    @terminator.setter
+    def terminator(self, value: str):
+        self._config.terminator = value
     
     @property
     def cme_err(self) -> str:
@@ -480,10 +460,12 @@ class AtClient:
                          prefix: str = '',
                          elapsed: Optional[float] = None) -> AtResponse:
         """Convert a raw response to `AtResponse`"""
+        trailer_result = self._config.trailer_result
+        trailer_info = self._config.trailer_info
         at_response = AtResponse(elapsed=elapsed, raw=response)
-        parts = [x for x in response.strip().split(self.trailer_info) if x]
+        parts = [x for x in response.strip().split(trailer_info) if x]
         if not self._config.verbose:
-            parts += parts.pop().split(self.trailer_result)
+            parts += parts.pop().split(trailer_result)
         if self._config.crc_sep in parts[-1]:
             _ = parts.pop()   # remove CRC
             at_response.crc_ok = validate_crc(response, self._config.crc_sep)
@@ -563,6 +545,7 @@ class AtClient:
         """Background thread to listen for responses/unsolicited."""
         buf = self._rx_buf
         peeked = None
+        # use encoded values for bytes/bytearray
         cr = self._config.cr.encode()
         lf = self._config.lf.encode()
         crc_sep = self._config.crc_sep.encode()
@@ -585,9 +568,6 @@ class AtClient:
             Returns:
                 A list of buffers, one for each AT response line.
             """
-            header = self.header.encode()
-            trailer_info = self.trailer_info.encode()
-            trailer_result = self.trailer_result.encode()
             lines: list[bytes] = []
             start = 0
             i = 0
@@ -606,56 +586,27 @@ class AtClient:
                     start = i
             if start < len(buffer):
                 lines.append(buffer[start:])
-            if header:   # V1: iterate lines to ensure headers and trailers
-                vlines = []
-                i = 0
-                while i < len(lines):
-                    line = lines[i]
-                    if line == header and i+1 < len(lines):
-                        vline = line + lines[i+1]
-                        i += 1
-                    else:
-                        vline = line
-                    if (vline.endswith((trailer_info, trailer_result)) and
-                        not vline.startswith(header) and
-                        not _is_crc(vline)):
+            i = 0
+            while i < len(lines):
+                if lines[i] == cr+lf and i + 1 < len(lines):
+                    lines[i] = lines[i] + lines[i+1]
+                    del lines[i+1]
+                line = lines[i]
+                if (line.endswith((b'OK'+cr+lf, b'ERROR'+cr+lf)) or
+                    line.startswith((b'+CME ERROR:', b'+CMS ERROR:'))):
+                    if not line.startswith(cr+lf):
+                        lines[i] = cr+lf + line
                         if warnings:
-                            _log.warning('Fixed missing header on %s',
-                                         dprint(vline.decode(errors='replace')))
-                        vline = header + vline
-                    vlines.append(vline)
-                    i += 1
-                lines = vlines
-            else:   # V0: iterate lines to ensure trailers
-                i = 0
-                while i < len(lines):
-                    line = lines[i]
-                    if line.endswith(trailer_info):
-                        i += 1
-                        continue
-                    if not line.endswith(trailer_result):
-                        if (line.endswith((b'0', b'4')) or
-                            line.startswith(cmx_error_prefixes)):
-                            if warnings:
-                                _log.warning('Fixed missing V0 trailer on %s',
-                                             dprint(line.decode(errors='replace')))
-                            line = line + trailer_result
-                    if (not line.startswith(tuple(res_V0)) and
-                        not line.startswith(cmx_error_prefixes)):
-                        if line.endswith(tuple(res_V0)):
-                            prev_line = line[:-2]
-                            line = line[-2:]
-                        else:
-                            split_index = line.find(b'+')
-                            prev_line = line[:split_index]
-                            line = line[split_index:]
+                            _log.warning('Fixed missing V1 result header on %s',
+                                         dprint(line.decode(errors='replace')))
+                elif line.endswith((b'0'+cr, b'4'+cr)) and len(line) > 2:
+                    if not self._cmd_pending or line != self._cmd_pending.encode():
+                        lines[i] = line[:-2] + cr+lf
+                        lines.insert(i+1, line[-2:])
                         if warnings:
                             _log.warning('Fixed missing V0 info trailer on %s',
-                                         dprint(prev_line.decode(errors='replace')))
-                        lines.insert(i, prev_line + trailer_info)
-                        i += 1
-                    lines[i] = line
-                    i += 1
+                                         dprint(line.decode(errors='replace')))
+                i += 1
             return lines
         
         def _is_response(buffer: bytearray, verbose: bool = True) -> bool:
@@ -720,7 +671,6 @@ class AtClient:
                         _log.warning('Dumped residual data: %s',
                                      dprint(residual.decode(errors="replace")))
                     del buffer[:idx]
-                self._update_config('echo', True)
                 del buffer[:len(cmd)]
                 if vlog(VLOG_TAG):
                     _log.debug('Removed echo: %s',
@@ -815,6 +765,8 @@ class AtClient:
                             if _has_echo(buf):
                                 self._update_config('echo', True)
                                 _remove_echo(buf)
+                            elif self.echo:
+                                self._update_config('echo', False)
                             if _is_crc_enable_cmd(buf):
                                 self._update_config('crc', True)
                             if self.crc:
@@ -847,10 +799,12 @@ class AtClient:
                             self._toggle_raw(False)
                             _log.debug('Assessing CR: %s',
                                        dprint(buf.decode(errors='replace')))
-                        if _has_echo(buf):
-                            self._update_config('echo', True)
-                            _remove_echo(buf)
-                        elif _is_response(buf, verbose=False): # check for V0
+                        if _is_response(buf, verbose=False): # check for V0
+                            if _has_echo(buf):
+                                self._update_config('echo', True)
+                                _remove_echo(buf)
+                            elif self.echo:
+                                self._update_config('echo', False)
                             peeked = self._serial.read(1)
                             if peeked != lf:   # V0 confirmed
                                 self._update_config('verbose', False)
@@ -929,16 +883,19 @@ class AtClient:
         Returns:
             Information response or URC from the buffer.
         """
+        header = self._config.header
+        trailer_result = self._config.trailer_result
+        trailer_info = self._config.trailer_info
         res = self._legacy_response
         if prefix:
             if not res.strip().startswith(prefix) and prefix in res:
                 lines = [line.strip() 
-                         for line in res.split(self.trailer_result) if line]
+                         for line in res.split(trailer_result) if line]
                 while not lines[0].startswith(prefix):
-                    urc = f'{self.header}{lines.pop(0)}{self.trailer_result}'
+                    urc = f'{header}{lines.pop(0)}{trailer_result}'
                     self._unsolicited_queue.put(urc)
                     _log.warning('Found pre-response URC: %s', dprint(urc))
-                res = f'{self.header}{(self.trailer_info).join(lines)}{self.trailer_result}'
+                res = f'{header}{(trailer_info).join(lines)}{trailer_result}'
             elif not res.strip().startswith(prefix):
                 _log.warning('Prefix %s not found', prefix)
             res = res.replace(prefix, '', 1)
