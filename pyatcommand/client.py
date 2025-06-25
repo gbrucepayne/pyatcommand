@@ -275,10 +275,11 @@ class AtClient:
         start_time = time.time()
         while not self.is_connected():
             if retry_timeout and time.time() - start_time > retry_timeout:
-                raise ConnectionError('Timed out trying to connect')
+                raise ConnectionError('Timed out trying to connect'
+                                      f' on {self._port}')
             attempts += 1
             if self._initialize(**init_kwargs):
-                _log.debug('Connected to %s at %d baud',
+                _log.debug('Initialized AT command mode on %s at %d baud',
                            self._port, self._baudrate)
                 return
             _log.debug('Failed to connect to %s at %d baud (attempt %d)',
