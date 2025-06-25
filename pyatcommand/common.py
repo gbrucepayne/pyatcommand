@@ -3,6 +3,8 @@
 import base64
 import binascii
 import glob
+import inspect
+import logging
 import os
 import platform
 import subprocess
@@ -23,6 +25,9 @@ AT_SEP = ';'
 AT_CRC_SEP = '*'
 
 
+_log = logging.getLogger(__name__)
+
+
 class AtErrorCode(IntEnum):
     """Error codes returned by a modem."""
     OK = 0   # V.25 standard
@@ -41,25 +46,161 @@ class AtErrorCode(IntEnum):
 
 
 class AtConfig:
-    """Configuration settings for a modem."""
+    """Configuration settings for a DCE/modem."""
     def __init__(self) -> None:
-        self.echo: bool = True
-        self.verbose: bool = True
-        self.quiet: bool = False
-        self.crc: Union[bool, None] = None
-        self.cr: str = AT_CR
-        self.lf: str = AT_LF
-        self.bs: str = AT_BS
-        self.sep: str = AT_SEP
-        self.crc_sep: str = AT_CRC_SEP
+        self._echo: bool = True
+        self._verbose: bool = True
+        self._quiet: bool = False
+        self._cr: str = AT_CR   # default S3 parameter value
+        self._lf: str = AT_LF   # default S4 parameter value
+        self._terminator: str = self.cr   # default command terminator
+        self._bs: str = AT_BS
+        self._sep: str = AT_SEP
+        self._crc: Union[bool, None] = None
+        self._crc_sep: str = AT_CRC_SEP
+        self._reserved = {'?', '=', '+', '%', '#', ' ', '\t', ';'}
+    
+    def _is_valid_alt_char(self, value: str, max_len: int = 1) -> bool:
+        if (not isinstance(value, str) or 
+            len(value) < 1 or len(value) > max_len or
+            value.isalnum() or
+            value in self._reserved):
+            return False
+        return True
+    
+    @property
+    def cr(self) -> str:
+        return self._cr
+    
+    @cr.setter
+    def cr(self, value: str):
+        if not self._is_valid_alt_char(value):
+            raise ValueError('Invalid S3 must be a valid character')
+        self._cr = value
+    
+    @property
+    def lf(self) -> str:
+        return self._lf
+    
+    @lf.setter
+    def lf(self, value: str):
+        if not self._is_valid_alt_char(value):
+            raise ValueError('Invalid S4 must be a valid character')
+        self._lf = value
+    
+    @property
+    def sep(self) -> str:
+        return self._sep
+    
+    @property
+    def bs(self) -> str:
+        return self._bs
+    
+    @bs.setter
+    def bs(self, value: str):
+        if not self._is_valid_alt_char(value):
+            raise ValueError('Invalid S5 must be a valid character')
+        self._bs = value
+    
+    @property
+    def echo(self) -> bool:
+        return self._echo
+    
+    @echo.setter
+    def echo(self, enable: bool):
+        if not isinstance(enable, bool):
+            raise ValueError('Invalid boolean')
+        self._echo = enable
+    
+    @property
+    def verbose(self) -> bool:
+        return self._verbose
+    
+    @verbose.setter
+    def verbose(self, enable: bool):
+        if not isinstance(enable, bool):
+            raise ValueError('Invalid boolean')
+        self._verbose = enable
+    
+    @property
+    def quiet(self) -> bool:
+        return self._quiet
+    
+    @quiet.setter
+    def quiet(self, enable: bool):
+        if not isinstance(enable, bool):
+            raise ValueError('Invalid boolean')
+        self._quiet = enable
     
     @property
     def terminator(self) -> str:
+        return self._terminator
+    
+    @terminator.setter
+    def terminator(self, value: str):
+        if not self._is_valid_alt_char(value, max_len=2):
+            raise ValueError('Invalid command terminator must be non-empty string')
+        if len(value) > 1:
+            _log.warning('Configuring multi-character command terminator')
+        self._terminator = value
+        
+    @property
+    def header(self) -> str:
+        """The response info or result header."""
+        if self.verbose:
+            return f'{self.cr}{self.lf}'
+        return ''
+    
+    @property
+    def trailer_result(self) -> str:
+        """The response result trailer."""
+        if self.verbose:
+            return f'{self.cr}{self.lf}'
+        return self.cr
+    
+    @property
+    def trailer_info(self) -> str:
+        """The response info trailer."""
         return f'{self.cr}{self.lf}'
     
+    @property
+    def crc(self) -> bool:
+        return self._crc
+    
+    @crc.setter
+    def crc(self, enable: bool):
+        if not isinstance(enable, bool):
+            raise ValueError('Invalid boolean')
+        self._crc = enable
+        
+    @property
+    def crc_sep(self) -> str:
+        """The CRC indicator to appear after the result code."""
+        return self._crc_sep
+    
+    @crc_sep.setter
+    def crc_sep(self, value: str):
+        if (not self._is_valid_alt_char(value) or
+            value in {self.cr, self.lf}):
+            raise ValueError('Invalid CRC separator')
+        self._crc_sep = value
+
+    def _asdict(self) -> dict[str, str]:
+        members = inspect.getmembers(type(self), 
+                                     lambda a: isinstance(a, property))
+        return { name: getattr(self, name) for name, attr in members }
+    
     def __repr__(self):
-        return '\n'.join(f'{k} = {dprint(str(v))}'
-                         for k, v in vars(self).items())
+        p_str = ''
+        for k, v in self._asdict().items():
+            if len(p_str) > 0:
+                p_str += ', '
+            p_str += f'{k}="{v}"' if isinstance(v, str) else f'{k}={v}'
+        return f'<{self.__class__.__name__}({p_str})'
+    
+    def __str__(self) -> str:
+        return '\n'.join(f'{k} = {dprint(v) if isinstance(v, str) else v}' 
+                         for k, v in self._asdict().items())
 
 
 class AtResponse:
@@ -93,6 +234,8 @@ class AtResponse:
         return self.result == AtErrorCode.OK
 
 
+# --------- Helpers / utilities ------------------------------------
+
 _dprint_map = {
     '\r': '<cr>',
     '\n': '<lf>',
@@ -121,16 +264,17 @@ def printable_char(c: int, debug: bool = False) -> bool:
     return printable
 
 
-def dprint(printable: str) -> str:
+def dprint(printable: str, map: bool = True) -> str:
     """Get a printable string on a single line."""
-    for k in _dprint_map:
-        printable = printable.replace(k, _dprint_map[k])
+    if map:
+        for k in _dprint_map:
+            printable = printable.replace(k, _dprint_map[k])
     unstrippable = []   # display unprintable ASCII
     for c in printable:
         if ord(c) <= 31 or ord(c) >= 127 and c not in unstrippable:
             unstrippable.append(c)
     for c in unstrippable:
-        printable = printable.replace(c, f'\\{hex(ord(c))[1:]}')
+        printable = printable.replace(c, f'\\x{ord(c):02X}')
     return printable
 
 
