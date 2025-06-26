@@ -104,6 +104,9 @@ class ModemSimulator:
         self._ser: serial.Serial = None
         self._baudrate: int = BAUDRATE
         self._request: str = ''
+        self.intermediate_pause: bool = False
+        self.data_mode: bool = False
+        self.data_mode_data = bytearray()
     
     @property
     def baudrate(self) -> int:
@@ -154,6 +157,11 @@ class ModemSimulator:
                 _log.error('DTE not connected')
                 return
             if self._ser and self._ser.in_waiting > 0:
+                if self.data_mode:
+                    self.data_mode_data += self._ser.read(self._ser.in_waiting)
+                    _log.debug('Data mode received %s',
+                               _debugf(self.data_mode_data.decode()))
+                    continue
                 b = self._ser.read()
                 try:
                     c = b.decode()
@@ -166,6 +174,7 @@ class ModemSimulator:
                         continue
                     _log.debug('Processing command: %s', _debugf(self._request))
                     echo = self._request + self.terminator if self.echo else ''
+                    intermediate_response = ''
                     response = ''
                     delay = 0
                     if self._request.upper() == 'AT':
@@ -182,8 +191,12 @@ class ModemSimulator:
                         res_meta = self.commands[self._request]
                         if isinstance(res_meta, str):
                             response = res_meta
-                        elif 'response' in res_meta:
+                        elif any(k in res_meta 
+                                 for k in {'intermediateReponse', 'response'}):
+                            intermediate_response: str = res_meta.get('intermediateResponse', '')
                             response: str = res_meta.get('response')
+                            if not response:
+                                raise ValueError('Invalid response definition')
                             if res_meta.get('hasEcho') is True:
                                 echo = ''
                             delay = res_meta.get('delay') or delay
@@ -194,6 +207,19 @@ class ModemSimulator:
                         response = VRES_ERR if self.verbose else RES_ERR
                     if echo:
                         self._ser.write(echo.encode())
+                    if intermediate_response:
+                        _log.info('Sending intermediate response to %s: %s',
+                                  _debugf(self._request),
+                                  _debugf(intermediate_response))
+                        self._ser.write(intermediate_response.encode())
+                        self.intermediate_pause = res_meta.get('intermediatePause', False)
+                        notify = self.intermediate_pause
+                        if notify:
+                            _log.warning('Paused waiting to reset intermediate_pause')
+                        while self.intermediate_pause:
+                            time.sleep(0.5)
+                        if notify:
+                            _log.debug('Intermediate pause completed')
                     if response:
                         if delay:
                             _log.debug('Delaying response %0.1f seconds', delay)

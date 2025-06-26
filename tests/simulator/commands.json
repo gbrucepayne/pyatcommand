@@ -21,5 +21,8 @@
     "AT!NONCOMPLY?": {"response": "\r\nMissing trailer\r\nOK\r\n"},
     "AT!V0NONCOMPLY?": {"response": "Missing trailer0\r"},
     "AT!ECHORACE?": {"response": "\r\n+URC: event data\r\nAT!ECHORACE?\r\r\n!ECHORACE: info\r\n\r\nOK\r\n", "hasEcho": true},
-    "AT!RESURCRACE?": {"response": "AT!RESURCRACE?\r\r\n+URC: event data\r\n\r\n!RESURCRACE: response 1\r\nresponse 2\r\n\r\nOK\r\n", "hasEcho": true}
+    "AT!RESURCRACE?": {"response": "AT!RESURCRACE?\r\r\n+URC: event data\r\n\r\n!RESURCRACE: response 1\r\nresponse 2\r\n\r\nOK\r\n", "hasEcho": true},
+    "AT!INTERMEDIATE=X": {"intermediateResponse": "\r\nINTERMEDIATE:>", "response": "\r\nOK\r\n", "intermediatePause": true},
+    "AT+CASEND=0,23": {"intermediateResponse": "\r\n>", "response": "\r\nOK\r\n"},
+    "AT#XSEND=,512": {"response": "\r\nOK\r\n"}
 }

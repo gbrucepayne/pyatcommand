@@ -6,7 +6,7 @@ import os
 import threading
 import time
 from queue import Empty, Queue
-from typing import Optional
+from typing import Callable, Optional
 
 import serial
 from dotenv import load_dotenv
@@ -85,6 +85,10 @@ class AtClient:
         self._legacy_cmd_error: Optional[AtErrorCode] = None
         # Advanced debug
         self.allow_unprintable_ascii: bool = False
+        # Data mode
+        self._data_mode: bool = False
+        self._intermediate_prompt: Optional[str] = None
+        self._intermediate_callback: Optional[Callable[[], None]] = None
 
     @property
     def port(self) -> Optional[str]:
@@ -113,8 +117,20 @@ class AtClient:
         self._baudrate = value
     
     @property
+    def data_mode(self) -> bool:
+        return self._data_mode
+    
+    @data_mode.setter
+    def data_mode(self, value: bool):
+        if not isinstance(value, bool):
+            raise ValueError('Data mode must be boolean')
+        self._data_mode = value
+    
+    @property
     def ready(self) -> bool:
-        return self._is_initialized and self._rx_ready.is_set()
+        return (self._is_initialized and 
+                self._rx_ready.is_set() and
+                not self.data_mode)
     
     @property
     def echo(self) -> bool:
@@ -380,13 +396,29 @@ class AtClient:
                      **kwargs) -> AtResponse:
         """Send an AT command and get the response.
         
+        The original/fixed raw response is available in `AtResponse.raw`.
+        
+        Data mode may be invoked by passing `intermediate_prompt` and
+        `intermediate_callback` where the prompt is identified during response
+        parsing to trigger the caller to set `data_mode` attribute then use the
+        `send_bytes_data_mode` or `recv_bytes_data_mode` method and then
+        clear `data_mode`.
+        Data passed in this way should include any data mode exit sequence.
+        Some implementations specify a number of bytes to expect then
+        auto-revert to command mode.
+        This approach expects the modem to return a final result code
+        (e.g. `OK`) after exiting data mode.
+        
         Args:
             command (str): The AT command to send.
             timeout (float): The maximum time in seconds to wait for a response.
                 `None` returns immediately and any response will be orphaned.
-            prefix (str): The prefix to remove.
-            **raw (bool): Return the full raw response with formatting if set.
-            **rx_ready_wait (float|None): Maximum time to wait for Rx ready
+            prefix (str): The prefix to remove from the information response.
+            **rx_ready_wait (float|None): Maximum time to wait for Rx ready.
+            **intermediate_prompt (str): If present, the intermediate result
+                code or prompt that triggers the `intermediate_callback`.
+            **intermediate_callback (Callable[[],None]): If present, triggers a
+                callback function for the caller when the prompt is received.
         
         Raises:
             `ValueError` if command is not a valid string or timeout is invalid.
@@ -395,6 +427,8 @@ class AtClient:
         """
         if not isinstance(command, str) or not command:
             raise ValueError('Invalid command')
+        if self.data_mode:
+            raise IOError('Cannot send command while in data mode')
         if timeout is not None:
             if not isinstance(timeout, (float, int)) or timeout < 0:
                 raise ValueError('Invalid command timeout')
@@ -403,6 +437,16 @@ class AtClient:
         rx_ready_wait = kwargs.get('rx_wait_timeout', AT_TIMEOUT)
         if not isinstance(rx_ready_wait, (float, int)):
             raise ValueError('Invalid rx_ready_wait')
+        intermediate_prompt = kwargs.get('intermediate_prompt')
+        if isinstance(intermediate_prompt, str):
+            if intermediate_prompt == '':
+                raise ValueError('Data mode prompt must be non-empty string')
+            self._intermediate_prompt = intermediate_prompt
+        intermediate_callback = kwargs.get('intermediate_callback')
+        if callable(intermediate_callback):
+            if not intermediate_prompt:
+                raise ValueError('Intermediate callback requires a prompt')
+            self._intermediate_callback = intermediate_callback
         with self._lock:
             full_cmd = self._prepare_command(command)
             self._rx_buf.clear()
@@ -430,23 +474,28 @@ class AtClient:
             try:
                 if timeout is None:
                     _log.warning(f'{command} timeout None may orphan response')
-                    return
+                    return AtResponse()
                 try:
-                    response: str = self._response_queue.get(timeout=timeout)
-                    if response is None:
+                    raw: str = self._response_queue.get(timeout=timeout)
+                    if raw is None:
                         exc = self._exception_queue.get_nowait()
                         if exc:
                             raise exc
                     elapsed = time.time() - start_time
-                    _log.debug('Response to %s: %s',
-                                command, dprint(response))
-                    return self._get_at_response(response, prefix, elapsed)
+                    _log.debug('Response to %s: %s', command, dprint(raw))
+                    return self._get_at_response(raw, prefix, elapsed)
                 except Empty:
                     err_msg = f'Command timed out: {command} ({timeout} s)'
                     _log.warning(err_msg)
                     raise AtTimeout(err_msg)
             finally:
                 self._cmd_pending = ''
+                if self._intermediate_prompt is not None:
+                    self._intermediate_prompt = None
+                    self._intermediate_callback = None
+                    if self._data_mode:
+                        _log.warning('Auto-revert from data to command mode')
+                        self._data_mode = False
     
     def _prepare_command(self, cmd: str) -> str:
         """Prepare the command before sending bytes."""
@@ -457,19 +506,19 @@ class AtClient:
         return cmd + terminator
     
     def _get_at_response(self,
-                         response: str,
+                         raw: str,
                          prefix: str = '',
                          elapsed: Optional[float] = None) -> AtResponse:
         """Convert a raw response to `AtResponse`"""
         trailer_result = self._config.trailer_result
         trailer_info = self._config.trailer_info
-        at_response = AtResponse(elapsed=elapsed, raw=response)
-        parts = [x for x in response.strip().split(trailer_info) if x]
+        at_response = AtResponse(elapsed=elapsed, raw=raw)
+        parts = [x for x in raw.strip().split(trailer_info) if x]
         if not self._config.verbose:
             parts += parts.pop().split(trailer_result)
         if self._config.crc_sep in parts[-1]:
             _ = parts.pop()   # remove CRC
-            at_response.crc_ok = validate_crc(response, self._config.crc_sep)
+            at_response.crc_ok = validate_crc(raw, self._config.crc_sep)
         if not self._cmd_pending:
             at_response.result = AtErrorCode.URC
             at_response.info = '\n'.join(parts)
@@ -500,6 +549,59 @@ class AtClient:
                 parts[0] = parts[0].replace(prefix, '', 1).strip()
             at_response.info = '\n'.join(parts)
         return at_response
+    
+    def send_bytes_data_mode(self, data: bytes, **kwargs):
+        """Send bytes in a streaming mode.
+        
+        May be modem-specific overridden in a subclass e.g. XMODEM
+        
+        Args:
+            data (bytes): The data to send
+        
+        Raises:
+            IOError if not in data mode.
+            ValueError if data is not a valid bytes buffer.
+        """
+        if not self.data_mode:
+            raise IOError('Unable to stream in command mode')
+        if not isinstance(data, bytes):
+            raise ValueError('Invalid data must be bytes/buffer')
+        self._serial.write(data)
+    
+    def recv_bytes_data_mode(self, **kwargs) -> bytes:
+        """Receive bytes in a streaming mode.
+        
+        May be modem-specific overridden in a subclass e.g. XMODEM
+        
+        Args:
+            data (bytes): The data to send
+            **timeout (float): Maximum seconds to wait for data
+            **size (int): Maximum bytes to read
+        
+        Raises:
+            IOError if not in data mode.
+        """
+        if not self.data_mode:
+            raise IOError('Unable to stream in command mode')
+        data = bytearray()
+        temp_timeout = kwargs.get('timeout')
+        restore_timeout = self._serial.timeout
+        if temp_timeout:
+            if not isinstance(temp_timeout, (float, int)) or temp_timeout < 0:
+                raise ValueError('Timeout must be non-negative integer')
+            self._serial.timeout = temp_timeout
+        size = kwargs.get('size')
+        if size < 1:
+            raise ValueError('Size must be positive integer if specified')
+        try:
+            if size > 0:
+                return self._serial.read(size)
+            while self._serial.in_waiting:
+                data += self._serial.read(size or self._serial.in_waiting)
+            return data
+        finally:
+            if temp_timeout:
+                self._serial.timeout = restore_timeout
     
     def get_urc(self, timeout: Optional[float] = 0.1) -> Optional[str]:
         """Retrieves an Unsolicited Result Code if present.
@@ -637,6 +739,21 @@ class AtClient:
                            dprint(buffer.decode(errors='replace')))
             return result
         
+        def _is_intermediate_result(buffer: bytearray) -> bool:
+            """Check if the pending command has an intermediate result.
+            
+            Triggers a callback if present.
+            """
+            if isinstance(self._intermediate_prompt, str):
+                if buffer.endswith(self._intermediate_prompt.encode()):
+                    _log.debug('Found intermediate result code %s',
+                               self._intermediate_prompt)
+                    if callable(self._intermediate_callback):
+                        _log.debug('Invoking intermediate callback')
+                        self._intermediate_callback()
+                    return True
+            return False
+        
         def _is_crc_enable_cmd(buffer: bytearray) -> bool:
             """Check if the pending command enables CRC."""
             return (self.crc_enable and
@@ -739,6 +856,8 @@ class AtClient:
         while self._rx_running and self._serial and self._rx_ready.is_set():
             try:
                 while self._serial.in_waiting > 0 or peeked:
+                    if self._data_mode:
+                        break
                     if self._rx_ready.is_set():
                         self._rx_ready.clear()
                         if vlog(VLOG_TAG):
@@ -814,6 +933,9 @@ class AtClient:
                                 else:
                                     _complete_parsing(buf)
                         assert buf is not None
+                    elif isinstance(self._intermediate_prompt, str):
+                        if _is_intermediate_result(buf):
+                            _log.debug('Processed intermediate result')
             except (AtDecodeError, serial.SerialException) as err:
                 buf.clear()
                 _log.error('%s: %s', err.__class__.__name__, str(err))

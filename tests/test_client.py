@@ -434,6 +434,79 @@ def test_urc_response_race(bridge, simulator, cclient: AtClient, log_verbose):
     assert urc is not None
 
 
+def test_intermediate_callback(bridge, simulator: ModemSimulator, cclient: AtClient, log_verbose, caplog):
+    """Case when an intermediate result triggers a callback."""
+    
+    def icb():
+        logger.info('Received intermediate callback')
+        simulator.intermediate_pause = False
+    
+    intermediate_prompt = '>'
+    res = cclient.send_command('AT!INTERMEDIATE=X',
+                               timeout=20,
+                               intermediate_prompt=intermediate_prompt,
+                               intermediate_callback=icb)
+    assert res.ok and isinstance(res.info, str) and intermediate_prompt in res.info
+    assert any(
+        record.levelname == 'INFO' and 'intermediate' in record.message
+        for record in caplog.records
+    )
+
+
+def test_intermediate_send_bytes_data_mode(bridge, simulator: ModemSimulator, cclient: AtClient, log_verbose, caplog):
+    """Case where an intermediate result triggers data mode in between final result.
+    
+    Example: SIMCOM modems
+    """
+    test_data = b'Test bytes in data mode'
+    test_data_len = len(test_data)
+    
+    def icb():
+        logger.info('Processing data mode callback')
+        simulator.data_mode = True
+        cclient.data_mode = True
+        cclient.send_bytes_data_mode(test_data)
+        cclient.data_mode = False
+    
+    res = cclient.send_command(f'AT+CASEND=0,{test_data_len}',
+                               timeout=90,
+                               intermediate_prompt='>',
+                               intermediate_callback=icb)
+    assert res.ok
+    assert simulator.data_mode_data == test_data
+    simulator.data_mode_data.clear()
+    simulator.data_mode = False
+
+
+def test_sequential_send_bytes_data_mode(bridge, simulator: ModemSimulator, cclient: AtClient, log_verbose, caplog):
+    """Case where the command triggers data mode after the final result.
+    
+    Example: Nordic nRF91xx modems
+    """
+    test_data = b'Test bytes in data mode'
+    data_mode_exit_sequence = b'+++'
+    res = cclient.send_command('AT#XSEND=,512',
+                               timeout=90)
+    if res.ok:
+        simulator.data_mode = True
+        cclient.data_mode = True
+        cclient.send_bytes_data_mode(test_data + data_mode_exit_sequence)
+        with pytest.raises(IOError):
+            cclient.send_command('AT')
+        simulator.data_mode = False
+        cclient.data_mode = False
+        assert simulator.data_mode_data == test_data + data_mode_exit_sequence
+        simulator.data_mode_data.clear()
+        assert cclient.send_command('AT').ok
+    else:
+        assert False
+
+
+def test_recv_bytes_data_mode(bridge, simulator: ModemSimulator, cclient: AtClient, log_verbose, caplog):
+    """Case for receiving/streaming data in."""
+    raise NotImplementedError
+
+
 def test_legacy_response(bridge: SerialBridge, simulator: ModemSimulator, cclient: AtClient):
     assert cclient.send_at_command('AT+GMI', timeout=3) == AtErrorCode.OK
     response = cclient.get_response()
