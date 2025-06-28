@@ -105,9 +105,24 @@ class ModemSimulator:
         self._baudrate: int = BAUDRATE
         self._request: str = ''
         self.intermediate_pause: bool = False
-        self.data_mode: bool = False
+        self._data_mode: bool = False
         self.data_mode_data = bytearray()
+        self._last_data_mode_rx_time: float = 0
+        self._data_mode_exit: 'str|None' = None
+        self._data_mode_exit_delay: float = 0
+        self._data_mode_exit_res: 'str|None' = None
     
+    @property
+    def data_mode(self) -> bool:
+        return self._data_mode
+    
+    @data_mode.setter
+    def data_mode(self, value: bool):
+        if not isinstance(value, bool):
+            raise ValueError('Data mode must be boolean')
+        _log.debug('%sing data mode', 'Enter' if value else 'Exit')
+        self._data_mode = value
+
     @property
     def baudrate(self) -> int:
         return self._baudrate
@@ -156,57 +171,98 @@ class ModemSimulator:
                 self.stop()
                 _log.error('DTE not connected')
                 return
-            if self._ser and self._ser.in_waiting > 0:
+            while self._ser and self._ser.in_waiting > 0:
                 if self.data_mode:
-                    self.data_mode_data += self._ser.read(self._ser.in_waiting)
-                    _log.debug('Data mode received %s',
-                               _debugf(self.data_mode_data.decode()))
-                    continue
-                b = self._ser.read()
+                    rx_data = self._ser.read(self._ser.in_waiting)
+                    if rx_data == self._data_mode_exit.encode():
+                        if self._last_data_mode_rx_time > 0:
+                            rx_delay = time.time() - self._last_data_mode_rx_time
+                        else:
+                            rx_delay = 0
+                        if (rx_delay >= self._data_mode_exit_delay or
+                            self._last_data_mode_rx_time == 0):
+                            _log.debug('Received exit sequence: %s after %0.1fs',
+                                       rx_data, rx_delay)
+                            self.data_mode = False
+                            self._data_mode_exit = None
+                            self._data_mode_exit_delay = 0
+                            self._last_data_mode_rx_time = 0
+                    else:
+                        self.data_mode_data += rx_data
+                        self._last_data_mode_rx_time = time.time()
+                        _log.debug('Data mode received %s',
+                                   _debugf(self.data_mode_data.decode()))
+                        if self._data_mode_exit == '<auto>':
+                            _log.debug('Auto-exit data mode')
+                            self.data_mode = False
+                        else:
+                            continue
+                    b = None
+                else:
+                    b = self._ser.read()
                 try:
-                    c = b.decode()
+                    c = b.decode() if b else self.terminator   # set terminator for data_mode exit case
                     if c not in string.printable:
                         raise UnprintableException
-                    # if self.echo:
-                    #     self._ser.write(b)
                     if c != self.terminator:
                         self._request += c
                         continue
-                    _log.debug('Processing command: %s', _debugf(self._request))
-                    echo = self._request + self.terminator if self.echo else ''
-                    intermediate_response = ''
-                    response = ''
-                    delay = 0
-                    if self._request.upper() == 'AT':
-                        response = VRES_OK if self.verbose else RES_OK
-                    elif self._request.upper().startswith('ATE'):
-                        self.echo = self._request.endswith('1')
-                        response = VRES_OK if self.verbose else RES_OK
-                    elif self._request.upper().startswith('ATV'):
-                        self.verbose = self._request.endswith('1')
-                        _log.debug('Verbose %sabled', 'en' if self.verbose else 'dis')
-                        response = VRES_OK if self.verbose else RES_OK
-                    elif self.commands and self._request in self.commands:
-                        _log.debug('Processing custom response')
-                        res_meta = self.commands[self._request]
-                        if isinstance(res_meta, str):
-                            response = res_meta
-                        elif any(k in res_meta 
-                                 for k in {'intermediateReponse', 'response'}):
-                            intermediate_response: str = res_meta.get('intermediateResponse', '')
-                            response: str = res_meta.get('response')
-                            if not response:
-                                raise ValueError('Invalid response definition')
-                            if res_meta.get('hasEcho') is True:
-                                echo = ''
-                            delay = res_meta.get('delay') or delay
-                    elif self._request in self.default_ok:
-                        response = VRES_OK if self.verbose else RES_OK
-                    else:
-                        _log.error('Unsupported command: %s', self._request)
-                        response = VRES_ERR if self.verbose else RES_ERR
+                    if self._request:
+                        _log.debug('Processing command: %s', _debugf(self._request))
+                        echo = self._request + self.terminator if self.echo else ''
+                        intermediate_response = ''
+                        data_mode_recv: 'bytes|None' = None
+                        response = ''
+                        response_delay = 0
+                        data_delay = 0
+                        if self._request.upper() == 'AT':
+                            response = VRES_OK if self.verbose else RES_OK
+                        elif self._request.upper().startswith('ATE'):
+                            self.echo = self._request.endswith('1')
+                            response = VRES_OK if self.verbose else RES_OK
+                        elif self._request.upper().startswith('ATV'):
+                            self.verbose = self._request.endswith('1')
+                            _log.debug('Verbose %sabled', 'en' if self.verbose else 'dis')
+                            response = VRES_OK if self.verbose else RES_OK
+                        elif self.commands and self._request in self.commands:
+                            _log.debug('Processing custom response')
+                            responses = {'intermediateResponse', 'response', 'recvData'}
+                            res_meta = self.commands.get(self._request)
+                            if isinstance(res_meta, str):
+                                response = res_meta
+                            elif any(k in res_meta for k in responses):
+                                intermediate_response: str = res_meta.get('intermediateResponse', '')
+                                recv_data_str = res_meta.get('recvData')
+                                if isinstance(recv_data_str, str):
+                                    data_mode_recv = recv_data_str.encode()
+                                data_delay = res_meta.get('dataDelay') or data_delay
+                                if res_meta.get('enterDataMode') is True:
+                                    _log.debug('Command triggers data mode')
+                                    self.data_mode = True
+                                    self._data_mode_exit = res_meta.get('exitDataMode')
+                                    self._data_mode_exit_res = res_meta.get('exitResponse')
+                                    if (not self._data_mode_exit or
+                                        not self._data_mode_exit_res):
+                                        raise ValueError('Data mode exit not defined'
+                                                        f' for {res_meta}')
+                                response: str = res_meta.get('response') or self._data_mode_exit_res
+                                if not response and not self.data_mode:
+                                    raise ValueError('Invalid response definition')
+                                if res_meta.get('hasEcho') is True:
+                                    echo = ''
+                                response_delay = res_meta.get('delay') or response_delay
+                        elif self._request in self.default_ok:
+                            response = VRES_OK if self.verbose else RES_OK
+                        else:
+                            _log.error('Unsupported command: %s', self._request)
+                            response = VRES_ERR if self.verbose else RES_ERR
+                    elif self._data_mode_exit_res:
+                        response = self._data_mode_exit_res
+                        self._data_mode_exit_res = None
                     if echo:
+                        _log.debug('Sending echo: %s', _debugf(echo))
                         self._ser.write(echo.encode())
+                        echo = ''
                     if intermediate_response:
                         _log.info('Sending intermediate response to %s: %s',
                                   _debugf(self._request),
@@ -221,9 +277,24 @@ class ModemSimulator:
                         if notify:
                             _log.debug('Intermediate pause completed')
                     if response:
-                        if delay:
-                            _log.debug('Delaying response %0.1f seconds', delay)
-                            time.sleep(delay)                            
+                        if response_delay:
+                            _log.debug('Delaying response %0.1f seconds', response_delay)
+                        time.sleep(response_delay)                            
+                        if (isinstance(data_mode_recv, bytes) and
+                            intermediate_response):
+                            if not self.data_mode:
+                                self.data_mode = True
+                            if data_delay:
+                                _log.debug('Delaying intermediate data %0.1f s',
+                                           data_delay)
+                            time.sleep(data_delay)
+                            _log.debug('Sending received %d bytes intermediate data mode',
+                                       len(data_mode_recv))
+                            self._ser.write(data_mode_recv)
+                            self._ser.flush()
+                            time.sleep(0.1)
+                            data_mode_recv = None   # clear to avoid resending
+                            self.data_mode = False
                         if not self.verbose:
                             pattern = r'\r\n.*?\r\n'
                             lines = re.findall(pattern, response, re.DOTALL)
@@ -240,9 +311,22 @@ class ModemSimulator:
                             bad_byte_offset = random.randint(0, len(to_write))
                             to_write.insert(bad_byte_offset, bad_byte)
                         _log.debug('Sending response to %s: %s',
-                                   _debugf(self._request),
+                                   _debugf(self._request or 'data mode exit'),
                                    _debugf(to_write.decode(errors='backslashreplace')))
                         self._ser.write(to_write)
+                    if (data_mode_recv):
+                        if not self.data_mode:
+                            self.data_mode = True
+                        if data_delay:
+                            _log.debug('Delaying post-response data %0.1f s',
+                                       data_delay)
+                        time.sleep(data_delay)
+                        _log.debug('Sending received %d bytes post-command data mode',
+                                    len(data_mode_recv))
+                        self._ser.write(data_mode_recv)
+                        self._ser.flush()
+                        data_mode_recv = None
+                        data_delay = 0
                     self._request = ''
                 except (UnicodeDecodeError, UnprintableException):
                     _log.error('Bad byte received [%d] - clearing buffer\n',

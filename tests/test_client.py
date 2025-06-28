@@ -453,58 +453,123 @@ def test_intermediate_callback(bridge, simulator: ModemSimulator, cclient: AtCli
     )
 
 
-def test_intermediate_send_bytes_data_mode(bridge, simulator: ModemSimulator, cclient: AtClient, log_verbose, caplog):
-    """Case where an intermediate result triggers data mode in between final result.
+def test_send_bytes_data_mode_intermediate(bridge, simulator: ModemSimulator, cclient: AtClient, log_verbose, caplog):
+    """Send data where an intermediate result triggers data mode in between final result.
     
-    Example: SIMCOM modems
+    Example: SIMCOM SIM7070G modem
     """
-    test_data = b'Test bytes in data mode'
+    test_data = b'Test send intermediate data mode'
     test_data_len = len(test_data)
     
-    def icb():
-        logger.info('Processing data mode callback')
+    def send_data_mode_intermediate():
+        logger.info('Processing data mode send callback')
         simulator.data_mode = True
         cclient.data_mode = True
         cclient.send_bytes_data_mode(test_data)
+        time.sleep(0.1)   # allow simulator to process
         cclient.data_mode = False
     
-    res = cclient.send_command(f'AT+CASEND=0,{test_data_len}',
+    res = cclient.send_command(f'AT+ISENDDATAMODE=1,{test_data_len}',
                                timeout=90,
-                               intermediate_prompt='>',
-                               intermediate_callback=icb)
+                               intermediate_prompt='\r\n>',
+                               intermediate_callback=send_data_mode_intermediate)
     assert res.ok
     assert simulator.data_mode_data == test_data
     simulator.data_mode_data.clear()
     simulator.data_mode = False
 
 
-def test_sequential_send_bytes_data_mode(bridge, simulator: ModemSimulator, cclient: AtClient, log_verbose, caplog):
+def test_recv_bytes_data_mode_intermediate(bridge, simulator: ModemSimulator, cclient: AtClient, log_verbose, caplog):
+    """Receive data where an intermediate result triggers data mode in between final result.
+    
+    Example: Skywave IDP modem (ignoring xmodem implementation)
+    """
+    received_bytes: 'bytes|None' = None
+    expected = b'Test recv intermediate data mode'
+    
+    def recv_data_mode_intermediate():
+        nonlocal received_bytes
+        logger.info('Processing data mode receive callback')
+        cclient.data_mode = True
+        time.sleep(0.1)   # yield to simulator to send data
+        received_bytes = cclient.recv_bytes_data_mode(timeout=2)
+        logger.info('Received %d bytes in data mode', len(received_bytes))
+        cclient.data_mode = False
+        time.sleep(0.1)   # yield to simulator to send closure
+    
+    res = cclient.send_command(f'AT+IRECVDATAMODE=1,1200',
+                               timeout=90,
+                               intermediate_prompt='\r\n+IRECVDATAMODE:',
+                               intermediate_callback=recv_data_mode_intermediate)
+    assert res.ok
+    assert isinstance(res.info, str) and len(res.info) > 0
+    assert isinstance(received_bytes, bytes) and len(received_bytes) > 0
+    assert received_bytes == expected
+
+
+def test_send_bytes_data_mode_sequential(bridge, simulator: ModemSimulator, cclient: AtClient, log_verbose, caplog):
     """Case where the command triggers data mode after the final result.
     
-    Example: Nordic nRF91xx modems
+    Example: Simcom SIM7070 switch to transparent mode
     """
-    test_data = b'Test bytes in data mode'
+    test_data = b'Test send switched data mode'
+    # Simcom style, use context 0 to distinguish send from receive simulation
     data_mode_exit_sequence = b'+++'
-    res = cclient.send_command('AT#XSEND=,512',
-                               timeout=90)
+    res = cclient.send_command('AT+CASWITCH=0,1', timeout=90)
+    time.sleep(0.25)   # allow simulator and URC to process
     if res.ok:
-        simulator.data_mode = True
+        deadline = time.time() + 2
+        while cclient.get_urc() != 'CONNECT':
+            if time.time() > deadline:
+                raise IOError('Timed out waiting for data mode prompt')
+            time.sleep(0.1)
         cclient.data_mode = True
-        cclient.send_bytes_data_mode(test_data + data_mode_exit_sequence)
-        with pytest.raises(IOError):
-            cclient.send_command('AT')
-        simulator.data_mode = False
+        cclient.send_bytes_data_mode(test_data)
+        time.sleep(1)   # delay for processing by simulator
+        cclient.send_bytes_data_mode(data_mode_exit_sequence)
+        time.sleep(1)
+        assert simulator.data_mode is False
         cclient.data_mode = False
-        assert simulator.data_mode_data == test_data + data_mode_exit_sequence
+        time.sleep(0.1)   # allow simulator to process
+        assert simulator.data_mode_data == test_data
         simulator.data_mode_data.clear()
+        assert cclient.get_urc() == 'OK'
         assert cclient.send_command('AT').ok
     else:
         assert False
 
 
-def test_recv_bytes_data_mode(bridge, simulator: ModemSimulator, cclient: AtClient, log_verbose, caplog):
-    """Case for receiving/streaming data in."""
-    raise NotImplementedError
+def test_recv_bytes_data_mode_sequential(bridge, simulator: ModemSimulator, cclient: AtClient, log_verbose, caplog):
+    """Receive data where modem is switched in and out of data mode by commands.
+    
+    Example: Simcom SIM7070 transparent mode
+    Example: Nordic nRF91xx modem (TBC case of binary vs ascii output)
+    """
+    received_bytes: 'bytes|None' = None
+    expected = b'Test recv switched data mode'
+    timeout = 80
+    # Simcom style, use context 1 to distinguish receive from send simulation
+    exit_data_mode = b'+++'
+    res = cclient.send_command(f'AT+CASWITCH=1,1', timeout=90)
+    time.sleep(0.25)   # allow simulator and URC to process
+    if res.ok:
+        deadline = time.time() + 2
+        while cclient.get_urc() != 'CONNECT':
+            if time.time() > deadline:
+                raise IOError('Timed out waiting for data mode prompt')
+            time.sleep(0.1)
+        cclient.data_mode = True
+        received_bytes = cclient.recv_bytes_data_mode(timeout=timeout)
+        assert isinstance(received_bytes, bytes) and received_bytes == expected
+        time.sleep(1)   # delay to distinguish from data
+        cclient.send_bytes_data_mode(exit_data_mode)
+        time.sleep(1)
+        cclient.data_mode = False
+        time.sleep(0.1)   # allow simulator to process
+        assert cclient.get_urc() == 'OK'
+        assert cclient.send_command('AT').ok
+    else:
+        assert False
 
 
 def test_legacy_response(bridge: SerialBridge, simulator: ModemSimulator, cclient: AtClient):

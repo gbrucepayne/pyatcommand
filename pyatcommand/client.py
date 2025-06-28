@@ -124,6 +124,12 @@ class AtClient:
     def data_mode(self, value: bool):
         if not isinstance(value, bool):
             raise ValueError('Data mode must be boolean')
+        # if value:  # complete processing of serial data first
+        #     with self._lock:
+        #         self._serial.flush()
+        #         while self._serial.in_waiting:   # process any pending rx data
+        #             time.sleep(0.1)
+        _log.debug('%sing data mode', 'Enter' if value else 'Exit')
         self._data_mode = value
     
     @property
@@ -417,6 +423,7 @@ class AtClient:
             **rx_ready_wait (float|None): Maximum time to wait for Rx ready.
             **intermediate_prompt (str): If present, the intermediate result
                 code or prompt that triggers the `intermediate_callback`.
+                It can start or finish the response line.
             **intermediate_callback (Callable[[],None]): If present, triggers a
                 callback function for the caller when the prompt is received.
         
@@ -492,10 +499,11 @@ class AtClient:
                 self._cmd_pending = ''
                 if self._intermediate_prompt is not None:
                     self._intermediate_prompt = None
+                if self._intermediate_callback is not None:
                     self._intermediate_callback = None
-                    if self._data_mode:
-                        _log.warning('Auto-revert from data to command mode')
-                        self._data_mode = False
+                if self._data_mode:
+                    _log.warning('Auto-revert from data to command mode')
+                    self._data_mode = False
     
     def _prepare_command(self, cmd: str) -> str:
         """Prepare the command before sending bytes."""
@@ -584,24 +592,32 @@ class AtClient:
         if not self.data_mode:
             raise IOError('Unable to stream in command mode')
         data = bytearray()
-        temp_timeout = kwargs.get('timeout')
         restore_timeout = self._serial.timeout
+        temp_timeout = kwargs.get('serial_read_timeout')
         if temp_timeout:
             if not isinstance(temp_timeout, (float, int)) or temp_timeout < 0:
                 raise ValueError('Timeout must be non-negative integer')
             self._serial.timeout = temp_timeout
+        timeout = kwargs.get('timeout', 0)
+        if not isinstance(timeout, (float, int)) or timeout < 0:
+            raise ValueError('Timeout must be non-negative')
         size = kwargs.get('size')
-        if size < 1:
+        if size is not None and (not isinstance(size, int) or size < 1):
             raise ValueError('Size must be positive integer if specified')
-        try:
-            if size > 0:
-                return self._serial.read(size)
-            while self._serial.in_waiting:
-                data += self._serial.read(size or self._serial.in_waiting)
-            return data
-        finally:
-            if temp_timeout:
-                self._serial.timeout = restore_timeout
+        start_time = time.time()
+        while not data or self._serial.in_waiting:
+            read_size = size or self._serial.in_waiting or 1
+            data += self._serial.read(read_size)
+            if size and len(data) == size:
+                _log.debug('Max data size %d bytes read', size)
+                break
+            if time.time() - start_time > timeout:
+                _log.warning('Timed out waiting for data with %d bytes',
+                             len(data))
+                break
+        if temp_timeout:
+            self._serial.timeout = restore_timeout
+        return bytes(data)
     
     def get_urc(self, timeout: Optional[float] = 0.1) -> Optional[str]:
         """Retrieves an Unsolicited Result Code if present.
@@ -648,6 +664,7 @@ class AtClient:
         """Background thread to listen for responses/unsolicited."""
         buf = self._rx_buf
         peeked = None
+        parsing_complete = False
         # use encoded values for bytes/bytearray
         cr = self._config.cr.encode()
         lf = self._config.lf.encode()
@@ -742,16 +759,18 @@ class AtClient:
         def _is_intermediate_result(buffer: bytearray) -> bool:
             """Check if the pending command has an intermediate result.
             
-            Triggers a callback if present.
+            Triggers a callback if `intermediate_prompt`
+            ends or starts the buffer.
             """
             if isinstance(self._intermediate_prompt, str):
-                if buffer.endswith(self._intermediate_prompt.encode()):
-                    _log.debug('Found intermediate result code %s',
-                               self._intermediate_prompt)
-                    if callable(self._intermediate_callback):
-                        _log.debug('Invoking intermediate callback')
-                        self._intermediate_callback()
-                    return True
+                prompt = self._intermediate_prompt.encode()
+                if prompt in buffer:
+                    for line in _at_splitlines(buffer):
+                        if line.startswith(prompt) or line.endswith(prompt):
+                            _log.debug('Found intermediate result code %s',
+                                       dprint(self._intermediate_prompt))
+                            self._intermediate_prompt = None
+                            return True
             return False
         
         def _is_crc_enable_cmd(buffer: bytearray) -> bool:
@@ -807,24 +826,30 @@ class AtClient:
             for line in lines:
                 if not line.strip() or _has_echo(line):
                     continue
+                try:
+                    urc = line.decode()
+                except UnicodeDecodeError:
+                    _log.warning('Invalid characters in URC: %s',
+                                    dprint(line.decode(errors='backslashreplace')))
+                    urc = line.decode(errors='ignore')
+                self._unsolicited_queue.put(urc)
                 if _is_response(line, self.verbose):
-                    _log.warning('Discarding orphan response: %s',
+                    _log.warning('Suspected orphan response: %s',
                                  dprint(line.decode(errors='backslashreplace')))
-                else:
-                    try:
-                        urc = line.decode()
-                    except UnicodeDecodeError:
-                        _log.warning('Invalid characters in URC: %s',
-                                     dprint(line.decode(errors='backslashreplace')))
-                        urc = line.decode(errors='ignore')
-                    self._unsolicited_queue.put(urc)
-                    if vlog(VLOG_TAG):
-                        _log.debug('Processed URC: %s', dprint(urc))
+                elif vlog(VLOG_TAG):
+                    _log.debug('Processed URC: %s', dprint(urc))
                 del buffer[:len(line)]
             return buffer   # residual data after parsing
             
-        def _complete_parsing(buffer: bytearray) -> bytearray:
-            """Complete the parsing of a response or unsolicited"""
+        def _complete_parsing(buffer: bytearray) -> bool:
+            """Complete the parsing of a response or unsolicited in the buffer.
+            
+            Args:
+                buffer (bytearray): The current receive buffer
+            
+            Returns:
+                True if there is no remaining serial data else False
+            """
             self._toggle_raw(False)
             lines = _at_splitlines(buffer, warnings=vlog(VLOG_TAG))
             clean_buf = bytearray().join(lines)
@@ -848,10 +873,12 @@ class AtClient:
                                  dprint(residual.decode(errors=errors)))
             if self._serial.in_waiting > 0:
                 _log.debug('More RX data to process')
+                return False
             else:
                 self._rx_ready.set()
                 if vlog(VLOG_TAG):
                     _log.debug('RX ready')
+                return True
         
         while self._rx_running and self._serial and self._rx_ready.is_set():
             try:
@@ -935,7 +962,14 @@ class AtClient:
                         assert buf is not None
                     elif isinstance(self._intermediate_prompt, str):
                         if _is_intermediate_result(buf):
-                            _log.debug('Processed intermediate result')
+                            if self._serial.in_waiting:
+                                _log.debug('Processing intermediate data')
+                                buf.extend(self._serial.read_all())
+                            if callable(self._intermediate_callback):
+                                _log.debug('Triggering intermediate callback %s',
+                                           self._intermediate_callback.__name__)
+                                self._intermediate_callback()
+                                self._intermediate_callback = None
             except (AtDecodeError, serial.SerialException) as err:
                 buf.clear()
                 _log.error('%s: %s', err.__class__.__name__, str(err))

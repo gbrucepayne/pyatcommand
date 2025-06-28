@@ -23,6 +23,8 @@
     "AT!ECHORACE?": {"response": "\r\n+URC: event data\r\nAT!ECHORACE?\r\r\n!ECHORACE: info\r\n\r\nOK\r\n", "hasEcho": true},
     "AT!RESURCRACE?": {"response": "AT!RESURCRACE?\r\r\n+URC: event data\r\n\r\n!RESURCRACE: response 1\r\nresponse 2\r\n\r\nOK\r\n", "hasEcho": true},
     "AT!INTERMEDIATE=X": {"intermediateResponse": "\r\nINTERMEDIATE:>", "response": "\r\nOK\r\n", "intermediatePause": true},
-    "AT+CASEND=0,23": {"intermediateResponse": "\r\n>", "response": "\r\nOK\r\n"},
-    "AT#XSEND=,512": {"response": "\r\nOK\r\n"}
+    "AT+ISENDDATAMODE=1,32": {"intermediateResponse": "\r\n>", "enterDataMode": true, "exitDataMode": "<auto>", "exitResponse": "\r\nOK\r\n"},
+    "AT+IRECVDATAMODE=1,1200": {"intermediateResponse": "\r\n+IRECVDATAMODE:4,0\r\n", "enterDataMode": true, "recvData": "Test recv intermediate data mode", "dataDelay": 1, "exitDataMode": "<auto>", "exitResponse": "\r\nOK\r\n"},
+    "AT+CASWITCH=0,1": {"response": "\r\nOK\r\n\r\nCONNECT\r\n", "enterDataMode": true, "exitDataMode": "+++", "exitResponse": "\r\nOK\r\n"},
+    "AT+CASWITCH=1,1": {"response": "\r\nOK\r\n\r\nCONNECT\r\n", "enterDataMode": true, "recvData": "Test recv switched data mode", "dataDelay": 1, "exitDataMode": "+++", "exitResponse": "\r\nOK\r\n"}
 }
