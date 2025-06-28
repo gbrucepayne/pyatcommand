@@ -664,7 +664,6 @@ class AtClient:
         """Background thread to listen for responses/unsolicited."""
         buf = self._rx_buf
         peeked = None
-        parsing_complete = False
         # use encoded values for bytes/bytearray
         cr = self._config.cr.encode()
         lf = self._config.lf.encode()
@@ -852,20 +851,33 @@ class AtClient:
             """
             self._toggle_raw(False)
             lines = _at_splitlines(buffer, warnings=vlog(VLOG_TAG))
-            clean_buf = bytearray().join(lines)
-            if (self._cmd_pending and
-                (_is_response(clean_buf, self.verbose) or _is_crc(clean_buf))):
+            response_lines = []
+            i = 0
+            found_response = False
+            while i < len(lines):
+                response_lines.append(lines[i])
+                combined = bytearray().join(response_lines)
+                if (self._cmd_pending and
+                    (_is_response(combined, self.verbose) or _is_crc(combined))):
+                    found_response = True
+                    break
+                i += 1
+            if found_response:
                 try:
-                    response = clean_buf.decode()
+                    response = bytearray().join(response_lines).decode()
                 except UnicodeDecodeError:
                     _log.warning('Invalid characters found in response: %s',
                                  dprint(buf.decode(errors='backslashreplace')))
-                    response = clean_buf.decode(errors='ignore')
+                    response = combined.decode(errors='ignore')
                 self._response_queue.put(response)
                 if vlog(VLOG_TAG):
                     _log.debug('Processed response: %s', dprint(response))
-                buffer.clear()
-            else:
+                # Remove consumed response lines from the list
+                del lines[:i + 1]
+            # Restore the buffer with remaining URCs/responses
+            buffer.clear()
+            buffer.extend(b''.join(lines))
+            if buffer:
                 residual = _process_urcs(buffer)
                 if residual:
                     errors = 'backslashreplace'
