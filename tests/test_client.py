@@ -497,7 +497,7 @@ def test_recv_bytes_data_mode_intermediate(bridge, simulator: ModemSimulator, cc
         cclient.data_mode = False
         time.sleep(0.1)   # yield to simulator to send closure
     
-    res = cclient.send_command(f'AT+IRECVDATAMODE=1,1200',
+    res = cclient.send_command('AT+IRECVDATAMODE=1,1200',
                                timeout=90,
                                intermediate_prompt='\r\n+IRECVDATAMODE:',
                                intermediate_callback=recv_data_mode_intermediate)
@@ -550,7 +550,7 @@ def test_recv_bytes_data_mode_sequential(bridge, simulator: ModemSimulator, ccli
     timeout = 80
     # Simcom style, use context 1 to distinguish receive from send simulation
     exit_data_mode = b'+++'
-    res = cclient.send_command(f'AT+CASWITCH=1,1', timeout=90)
+    res = cclient.send_command('AT+CASWITCH=1,1', timeout=90)
     time.sleep(0.25)   # allow simulator and URC to process
     if res.ok:
         deadline = time.time() + 2
