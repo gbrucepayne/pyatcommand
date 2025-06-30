@@ -221,18 +221,25 @@ def test_non_verbose(bridge, simulator: ModemSimulator, cclient: AtClient):
     assert isinstance(at_response.info, str) and len(at_response.info) > 0
 
 
-def test_send_command_crc(bridge, simulator, cclient: AtClient):
+def test_send_command_crc(bridge, simulator, cclient: AtClient, caplog):
     cclient.crc_enable = 'AT%CRC=1'
     assert cclient.crc_disable == 'AT%CRC=0'
     assert cclient.crc is False
     at_response = cclient.send_command('AT%CRC=1')
-    assert at_response.ok
+    assert at_response.ok is True
     assert at_response.crc_ok is True
     assert cclient.crc is True
     at_response = cclient.send_command('AT%CRC=0')
-    assert not at_response.ok
-    assert at_response.crc_ok
+    assert at_response.ok is False
+    assert at_response.crc_ok is True
     assert cclient.crc is True
+    res = cclient.send_command('AT+BADCRC?', timeout=90)
+    assert res.ok is False
+    assert res.crc_ok is False
+    assert any(
+        record.levelname == 'WARNING' and 'invalid crc' in record.message.lower()
+        for record in caplog.records
+    )
     at_response = cclient.send_command('AT%CRC=0*BBEB')
     assert at_response.ok
     assert at_response.crc_ok is None
@@ -385,11 +392,10 @@ def test_timeout(bridge, simulator, cclient: AtClient):
 
 
 def test_bad_byte(bridge, simulator, cclient: AtClient, caplog):
-    # with caplog.at_level(logging.WARNING):
-    # with pytest.raises(AtDecodeError):
-    res = cclient.send_command('AT!BAD_BYTE?', timeout=2)
-    assert res.ok is True
-    assert any('invalid char' in message.lower() for message in caplog.messages)
+    for p in ['B', 'M', 'E']:
+        res = cclient.send_command(f'AT!BAD_BYTE_{p}?', timeout=2)
+        assert res.ok is True
+        assert any('invalid char' in message.lower() for message in caplog.messages)
 
 
 def test_response_plus_urc(bridge, simulator, cclient: AtClient):
@@ -612,7 +618,7 @@ def test_legacy_then_urc(bridge, simulator: ModemSimulator, cclient: AtClient):
     response = cclient.get_response()
     assert cclient.is_response_ready() is False
     assert response == 'Simulated Modems Inc'
-    assert cclient._rx_ready.is_set()
+    assert cclient.ready
     simulator.inject_urc(urc)
     received = False
     start_time = time.time()

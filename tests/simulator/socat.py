@@ -306,9 +306,16 @@ class ModemSimulator:
                                 response = ''.join(lines)
                         to_write = response.encode()
                         if 'BAD_BYTE' in self._request:
+                            # since we can't store escaped non-printable in commands.json
                             bad_byte = 0xFF
                             to_write = bytearray(to_write)
-                            bad_byte_offset = random.randint(0, len(to_write))
+                            position = self._request[-2]
+                            if position == 'B':
+                                bad_byte_offset = 0
+                            elif position == 'M':
+                                bad_byte_offset = int(len(to_write) / 2)
+                            else:
+                                bad_byte_offset = len(to_write) - 1
                             to_write.insert(bad_byte_offset, bad_byte)
                         _log.debug('Sending response to %s: %s',
                                    _debugf(self._request or 'data mode exit'),
