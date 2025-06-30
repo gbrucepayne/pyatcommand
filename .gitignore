@@ -8,3 +8,4 @@ simdce
 simdte
 dist
 indev
+.coverage

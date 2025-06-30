@@ -17,6 +17,7 @@ pyserial-asyncio = "^0.6"
 pylint = "^3.2.3"
 pytest = "^8.2.2"
 pytest-asyncio = "^1.0.0"
+pytest-cov = "^6.2.1"
 
 [tool.pytest.ini_options]
 log_cli = true
