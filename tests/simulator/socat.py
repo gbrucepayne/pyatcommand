@@ -16,7 +16,6 @@ import time
 import atexit
 import string
 import re
-import random
 
 import serial
 from serial.tools.list_ports import comports
