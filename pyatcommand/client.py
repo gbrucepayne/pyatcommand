@@ -17,7 +17,6 @@ from .common import (
     AtErrorCode,
     AtResponse,
     dprint,
-    printable_char,
     vlog,
 )
 from .crcxmodem import apply_crc, validate_crc
@@ -671,6 +670,7 @@ class AtClient:
         res_V1 = [r.encode() for r in self.res_V1]
         res_V0 = [r.encode() for r in self.res_V0]
         cmx_error_prefixes = (b'+CME ERROR:', b'+CMS ERROR:')
+        crc_sep = self.crc_sep.encode()
         
         def _at_splitlines(buffer: bytearray, warnings: bool = False) -> list[bytes]:
             """Split a buffer into lines according to AT spec.
@@ -690,12 +690,14 @@ class AtClient:
             lines: list[bytes] = []
             start = 0
             i = 0
+            try:
+                buffer.decode()
+            except UnicodeDecodeError:
+                _log.warning('Removed %d invalid characters in buffer',
+                             buffer.decode(errors='replace').count('\uFFFD'))
+                buffer[:] = buffer.decode(errors='ignore').encode()
             while i < len(buffer):
                 char = buffer[i:i+1]
-                if not printable_char(char[0]):
-                    _log.warning('Removing invalid char 0x%02X', char[0])
-                    buffer.pop(i)
-                    continue
                 next_char = buffer[i+1:i+2] if i+1 < len(buffer) else None
                 i += 1
                 if char in (cr, lf):
@@ -786,8 +788,11 @@ class AtClient:
             
         def _is_crc(buffer: bytearray) -> bool:
             """Check if the buffer is a CRC for a response."""
-            candidate = buffer.decode(errors='ignore').strip()[-5:]
-            return candidate.startswith(self.crc_sep) and len(candidate) == 5
+            lines = _at_splitlines(buffer)
+            if not lines:
+                return False
+            last_line = lines[-1].strip()
+            return last_line.startswith(crc_sep) and len(last_line) == 5
             
         def _has_echo(buffer: bytearray) -> bool:
             """Check if the buffer includes an echo for the pending command."""
@@ -829,7 +834,7 @@ class AtClient:
                     urc = line.decode()
                 except UnicodeDecodeError:
                     _log.warning('Invalid characters in URC: %s',
-                                    dprint(line.decode(errors='backslashreplace')))
+                                 dprint(line.decode(errors='backslashreplace')))
                     urc = line.decode(errors='ignore')
                 self._unsolicited_queue.put(urc)
                 if _is_response(line, self.verbose):
@@ -857,10 +862,17 @@ class AtClient:
             while i < len(lines):
                 response_lines.append(lines[i])
                 combined = bytearray().join(response_lines)
-                if (self._cmd_pending and
-                    (_is_response(combined, self.verbose) or _is_crc(combined))):
-                    found_response = True
-                    break
+                if self._cmd_pending:
+                    if _is_crc(combined) and self.crc:
+                        if not validate_crc(combined.decode(errors='ignore'),
+                                            self.crc_sep):
+                            _log.warning('Invalid CRC in response: %s',
+                                         dprint(combined.decode(errors='replace')))
+                        found_response = True
+                    elif _is_response(combined, self.verbose) and not self.crc:
+                        found_response = True
+                    if found_response:
+                        break
                 i += 1
             if found_response:
                 try:
@@ -945,10 +957,6 @@ class AtClient:
                             if _has_echo(buf):
                                 self._update_config('echo', True)
                                 _remove_echo(buf)
-                            if not validate_crc(buf.decode(errors='ignore'),
-                                                self._config.crc_sep):
-                                self._toggle_raw(False)
-                                _log.warning('Invalid CRC')
                             _complete_parsing(buf)
                         elif not self._cmd_pending:
                             # URC(s)
