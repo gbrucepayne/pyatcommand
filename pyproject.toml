@@ -12,6 +12,7 @@ python = "^3.9"
 pyserial = "^3.5"
 python-dotenv = "^1.0.1"
 pyserial-asyncio = "^0.6"
+xmodem = "^0.4.7"
 
 [tool.poetry.group.dev.dependencies]
 pylint = "^3.2.3"

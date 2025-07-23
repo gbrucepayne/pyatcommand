@@ -6,11 +6,12 @@ import random
 import threading
 import time
 from unittest.mock import Mock, patch  # noqa: F401
+from typing import Callable, Optional, Literal
 
 import pytest
+import serial
 
-from pyatcommand import AtErrorCode, AtTimeout
-from pyatcommand.client import AtClient
+from pyatcommand import AtErrorCode, AtTimeout, AtClient, xmodem_bytes_handler
 from pyatcommand.common import list_available_serial_ports
 
 from .simulator.socat import COMMAND_FILE, DTE, ModemSimulator, SerialBridge
@@ -123,6 +124,64 @@ def cclient():
     client = AtClient()
     client.connect(port=DTE, retry_timeout=5)
     yield client
+    client.disconnect()
+
+
+class XmodemClient(AtClient):
+    """A class for testing XMODEM handling."""
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._binary_handler: Optional[Callable[[bytes], None]] = None
+
+    def set_binary_handler(self,
+                           handler: Callable[[serial.Serial, Literal['recv', 'send'], Optional[bytes]], None],
+                           direction: Literal['recv', 'send'] = 'recv',
+                           data: Optional[bytes] = None):
+        """Assign a handler to run in data mode."""
+        self._binary_handler = lambda ser: handler(ser, direction, data)
+    
+    def close_binary_handler(self):
+        self._binary_handler = None
+        
+    def send_bytes_data_mode(self, data, **kwargs) -> int:
+        dce = kwargs.get('dce')
+        if isinstance(dce, ModemSimulator):
+            dce.intermediate_pause = False
+        self.set_binary_handler(xmodem_bytes_handler,
+                                direction='send',
+                                data=data)
+        self.data_mode = True
+        self._binary_handler(self._serial)
+        self.data_mode = False
+        self._binary_handler = None
+    
+    def recv_bytes_data_mode(self, **kwargs) -> bytes:
+        data_callback = kwargs.get('data_callback')
+        strip = kwargs.get('strip', False)
+        dce = kwargs.get('dce')
+        if isinstance(dce, ModemSimulator):
+            dce.intermediate_pause = False
+        self.set_binary_handler(xmodem_bytes_handler,
+                                direction='recv')
+        self.data_mode = True
+        data = self._binary_handler(self._serial)
+        self.data_mode = False
+        self._binary_handler = None
+        if strip is True:
+            data = data.rstrip(b'\x1a')
+        if callable(data_callback):
+            data_callback(data)
+        else:
+            logger.warning('No callback provided for data: %r', data)
+
+
+@pytest.fixture
+def xclient():
+    """Connected client with xmodem data mode"""
+    client = XmodemClient()
+    client.connect(port=DTE, retry_timeout=5)
+    yield client
+    client.close_binary_handler()
     client.disconnect()
 
 
@@ -447,12 +506,12 @@ def test_intermediate_callback(bridge, simulator: ModemSimulator, cclient: AtCli
         logger.info('Received intermediate callback')
         simulator.intermediate_pause = False
     
-    intermediate_prompt = '>'
+    mid_prompt = '\r'   # '>'
     res = cclient.send_command('AT!INTERMEDIATE=X',
-                               timeout=20,
-                               intermediate_prompt=intermediate_prompt,
-                               intermediate_callback=icb)
-    assert res.ok and isinstance(res.info, str) and intermediate_prompt in res.info
+                               timeout=90,
+                               mid_prompt=mid_prompt,
+                               mid_cb=icb)
+    assert res.ok and isinstance(res.info, str) and mid_prompt in res.info
     assert any(
         record.levelname == 'INFO' and 'intermediate' in record.message
         for record in caplog.records
@@ -467,18 +526,16 @@ def test_send_bytes_data_mode_intermediate(bridge, simulator: ModemSimulator, cc
     test_data = b'Test send intermediate data mode'
     test_data_len = len(test_data)
     
-    def send_data_mode_intermediate():
+    def send_data_mode_intermediate(data):
         logger.info('Processing data mode send callback')
-        simulator.data_mode = True
-        cclient.data_mode = True
-        cclient.send_bytes_data_mode(test_data)
-        time.sleep(0.1)   # allow simulator to process
-        cclient.data_mode = False
+        cclient.send_bytes_data_mode(data, auto=True)
     
     res = cclient.send_command(f'AT+ISENDDATAMODE=1,{test_data_len}',
                                timeout=90,
-                               intermediate_prompt='\r\n>',
-                               intermediate_callback=send_data_mode_intermediate)
+                               mid_prompt='\r\n>',
+                               mid_cb=send_data_mode_intermediate,
+                               mid_cb_args=(test_data,),
+                               )
     assert res.ok
     assert simulator.data_mode_data == test_data
     simulator.data_mode_data.clear()
@@ -505,8 +562,8 @@ def test_recv_bytes_data_mode_intermediate(bridge, simulator: ModemSimulator, cc
     
     res = cclient.send_command('AT+IRECVDATAMODE=1,1200',
                                timeout=90,
-                               intermediate_prompt='\r\n+IRECVDATAMODE:',
-                               intermediate_callback=recv_data_mode_intermediate)
+                               mid_prompt='\r\n+IRECVDATAMODE:',
+                               mid_cb=recv_data_mode_intermediate)
     assert res.ok
     assert isinstance(res.info, str) and len(res.info) > 0
     assert isinstance(received_bytes, bytes) and len(received_bytes) > 0
@@ -530,8 +587,10 @@ def test_send_bytes_data_mode_sequential(bridge, simulator: ModemSimulator, ccli
                 raise IOError('Timed out waiting for data mode prompt')
             time.sleep(0.1)
         cclient.data_mode = True
+        logger.debug('Sending data')
         cclient.send_bytes_data_mode(test_data)
         time.sleep(1)   # delay for processing by simulator
+        logger.debug('Sending exit sequence')
         cclient.send_bytes_data_mode(data_mode_exit_sequence)
         time.sleep(1)
         assert simulator.data_mode is False
@@ -576,6 +635,40 @@ def test_recv_bytes_data_mode_sequential(bridge, simulator: ModemSimulator, ccli
         assert cclient.send_command('AT').ok
     else:
         assert False
+
+
+def test_send_xmodem(bridge, simulator: ModemSimulator, xclient: XmodemClient):
+    """"""
+    logging.getLogger('xmodem').setLevel(logging.DEBUG)
+    data_to_send = b'Test sending XMODEM data'
+    resp = xclient.send_command(f'AT+XMODEMSEND={len(data_to_send)}',
+                                timeout=10,
+                                mid_prompt='C',
+                                mid_cb=xclient.send_bytes_data_mode,
+                                mid_cb_args=(data_to_send,),
+                                mid_cb_kwargs={'dce': simulator})
+    assert resp.ok is True
+    assert simulator.data_mode_data == data_to_send
+
+
+def test_recv_xmodem(bridge, simulator: ModemSimulator, xclient: XmodemClient, log_verbose):
+    """"""
+    expected = b'Test receiving XMODEM data'
+    
+    def data_callback(data: bytes):
+        logger.info('Received: %r', data.rstrip(b'\x1a'))
+        assert data.rstrip(b'\x1a') == expected
+    
+    logging.getLogger('xmodem').setLevel(logging.DEBUG)
+    resp = xclient.send_command(f'AT+XMODEMRECV={len(expected)}',
+                                timeout=10,
+                                mid_prompt='+XMODEMRECV:',
+                                mid_cb=xclient.recv_bytes_data_mode,
+                                mid_cb_kwargs={
+                                    'data_callback': data_callback,
+                                    'dce': simulator,
+                                })
+    assert resp.ok is True
 
 
 def test_legacy_response(bridge: SerialBridge, simulator: ModemSimulator, cclient: AtClient):

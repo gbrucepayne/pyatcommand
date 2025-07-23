@@ -6,7 +6,7 @@ import os
 import threading
 import time
 from queue import Empty, Queue
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 import serial
 from dotenv import load_dotenv
@@ -86,8 +86,10 @@ class AtClient:
         self.allow_unprintable_ascii: bool = False
         # Data mode
         self._data_mode: bool = False
-        self._intermediate_prompt: Optional[str] = None
-        self._intermediate_callback: Optional[Callable[[], None]] = None
+        self._mid_prompt: Optional[str] = None
+        self._mid_cb: Optional[Callable[[], None]] = None
+        self._mid_cb_args: tuple = ()
+        self._mid_cb_kwargs: dict[str, Any] = {}
 
     @property
     def port(self) -> Optional[str]:
@@ -403,8 +405,8 @@ class AtClient:
         
         The original/fixed raw response is available in `AtResponse.raw`.
         
-        Data mode may be invoked by passing `intermediate_prompt` and
-        `intermediate_callback` where the prompt is identified during response
+        Data mode may be invoked by passing `mid_prompt` and
+        `mid_cb` where the prompt is identified during response
         parsing to trigger the caller to set `data_mode` attribute then use the
         `send_bytes_data_mode` or `recv_bytes_data_mode` method and then
         clear `data_mode`.
@@ -420,10 +422,10 @@ class AtClient:
                 `None` returns immediately and any response will be orphaned.
             prefix (str): The prefix to remove from the information response.
             **rx_ready_wait (float|None): Maximum time to wait for Rx ready.
-            **intermediate_prompt (str): If present, the intermediate result
-                code or prompt that triggers the `intermediate_callback`.
+            **mid_prompt (str): If present, the intermediate result
+                code or prompt that triggers the `mid_cb`.
                 It can start or finish the response line.
-            **intermediate_callback (Callable[[],None]): If present, triggers a
+            **mid_cb (Callable[[],None]): If present, triggers a
                 callback function for the caller when the prompt is received.
         
         Raises:
@@ -443,16 +445,27 @@ class AtClient:
         rx_ready_wait = kwargs.get('rx_wait_timeout', AT_TIMEOUT)
         if not isinstance(rx_ready_wait, (float, int)):
             raise ValueError('Invalid rx_ready_wait')
-        intermediate_prompt = kwargs.get('intermediate_prompt')
-        if isinstance(intermediate_prompt, str):
-            if intermediate_prompt == '':
+        mid_prompt = kwargs.get('mid_prompt')
+        if isinstance(mid_prompt, str):
+            if mid_prompt == '':
                 raise ValueError('Data mode prompt must be non-empty string')
-            self._intermediate_prompt = intermediate_prompt
-        intermediate_callback = kwargs.get('intermediate_callback')
-        if callable(intermediate_callback):
-            if not intermediate_prompt:
+            self._mid_prompt = mid_prompt
+        mid_cb = kwargs.get('mid_cb')
+        if callable(mid_cb):
+            if not mid_prompt:
                 raise ValueError('Intermediate callback requires a prompt')
-            self._intermediate_callback = intermediate_callback
+            self._mid_cb = mid_cb
+            mid_cb_args = kwargs.get('mid_cb_args')
+            if isinstance(mid_cb_args, tuple):
+                self._mid_cb_args = mid_cb_args
+            elif mid_cb_args is not None:
+                raise ValueError('mid_cb_args must be a tuple')
+            mid_cb_kwargs = kwargs.get('mid_cb_kwargs')
+            if (isinstance(mid_cb_kwargs, dict) and
+                all(isinstance(k, str) for k in mid_cb_kwargs)):
+                self._mid_cb_kwargs = mid_cb_kwargs
+            elif mid_cb_kwargs is not None:
+                raise ValueError('mid_cb_kwargs must be a dictionary')
         with self._lock:
             full_cmd = self._prepare_command(command)
             self._rx_buf.clear()
@@ -496,10 +509,8 @@ class AtClient:
                     raise AtTimeout(err_msg)
             finally:
                 self._cmd_pending = ''
-                if self._intermediate_prompt is not None:
-                    self._intermediate_prompt = None
-                if self._intermediate_callback is not None:
-                    self._intermediate_callback = None
+                if self._mid_prompt is not None:
+                    self._reset_mid_cb()
                 if self._data_mode:
                     _log.warning('Auto-revert from data to command mode')
                     self._data_mode = False
@@ -512,6 +523,12 @@ class AtClient:
             cmd = apply_crc(cmd.rstrip())
         return cmd + terminator
     
+    def _reset_mid_cb(self):
+        self._mid_prompt = None
+        self._mid_cb = None
+        self._mid_cb_args = ()
+        self._mid_cb_kwargs = {}
+        
     def _get_at_response(self,
                          raw: str,
                          prefix: str = '',
@@ -557,23 +574,32 @@ class AtClient:
             at_response.info = '\n'.join(parts)
         return at_response
     
-    def send_bytes_data_mode(self, data: bytes, **kwargs):
+    def send_bytes_data_mode(self, data: bytes, **kwargs) -> int:
         """Send bytes in a streaming mode.
         
         May be modem-specific overridden in a subclass e.g. XMODEM
         
         Args:
             data (bytes): The data to send
+            **auto (bool): If True, enables/disables data_mode around send
         
         Raises:
             IOError if not in data mode.
             ValueError if data is not a valid bytes buffer.
         """
-        if not self.data_mode:
-            raise IOError('Unable to stream in command mode')
         if not isinstance(data, bytes):
             raise ValueError('Invalid data must be bytes/buffer')
-        self._serial.write(data)
+        auto = kwargs.get('auto', False)
+        if auto is True:
+            self.data_mode = True
+        elif not self.data_mode:
+            raise IOError('Unable to stream in command mode')
+        written = self._serial.write(data)
+        self._serial.flush()
+        time.sleep(0.1)
+        if auto is True:
+            self.data_mode = False
+        return written or 0
     
     def recv_bytes_data_mode(self, **kwargs) -> bytes:
         """Receive bytes in a streaming mode.
@@ -584,11 +610,15 @@ class AtClient:
             data (bytes): The data to send
             **timeout (float): Maximum seconds to wait for data
             **size (int): Maximum bytes to read
+            **auto (bool): If True, enable/disable data_mode around receive
         
         Raises:
             IOError if not in data mode.
         """
-        if not self.data_mode:
+        auto = kwargs.get('auto', False)
+        if auto is True:
+            self.data_mode = True
+        elif not self.data_mode:
             raise IOError('Unable to stream in command mode')
         data = bytearray()
         restore_timeout = self._serial.timeout
@@ -616,6 +646,8 @@ class AtClient:
                 break
         if temp_timeout:
             self._serial.timeout = restore_timeout
+        if auto is True:
+            self._data_mode = False
         return bytes(data)
     
     def get_urc(self, timeout: Optional[float] = 0.1) -> Optional[str]:
@@ -760,17 +792,18 @@ class AtClient:
         def _is_intermediate_result(buffer: bytearray) -> bool:
             """Check if the pending command has an intermediate result.
             
-            Triggers a callback if `intermediate_prompt`
+            Triggers a callback if `mid_prompt`
             ends or starts the buffer.
             """
-            if isinstance(self._intermediate_prompt, str):
-                prompt = self._intermediate_prompt.encode()
-                if prompt in buffer:
+            if isinstance(self._mid_prompt, str):
+                prompt = self._mid_prompt.encode()
+                if prompt in buffer:  # and not _has_echo(buffer):
                     for line in _at_splitlines(buffer):
                         if line.startswith(prompt) or line.endswith(prompt):
-                            _log.debug('Found intermediate result code %s',
-                                       dprint(self._intermediate_prompt))
-                            self._intermediate_prompt = None
+                            _log.debug('Found intermediate result %s in %s',
+                                       dprint(self._mid_prompt),
+                                       dprint(line.decode(errors='ignore')))
+                            self._mid_prompt = None
                             return True
             return False
         
@@ -816,6 +849,14 @@ class AtClient:
                 if vlog(VLOG_TAG):
                     _log.debug('Removed echo: %s',
                                dprint(cmd.decode(errors='replace')))
+        
+        def _handle_echo(buffer: bytearray):
+            """Check for and remove a command echo."""
+            if _has_echo(buffer):
+                self._update_config('echo', True)
+                _remove_echo(buf)
+            elif self.echo:
+                self._update_config('echo', False)                
         
         def _process_urcs(buffer: bytearray) -> bytearray:
             """Process URC(s) from the buffer into the unsolicited queue.
@@ -933,11 +974,12 @@ class AtClient:
                                        dprint(buf.decode(errors='replace')))
                         if _is_response(buf, verbose=True):
                             self._update_config('verbose', True)
-                            if _has_echo(buf):
-                                self._update_config('echo', True)
-                                _remove_echo(buf)
-                            elif self.echo:
-                                self._update_config('echo', False)
+                            _handle_echo(buf)  # this should never happen
+                            # if _has_echo(buf):
+                            #     self._update_config('echo', True)
+                            #     _remove_echo(buf)
+                            # elif self.echo:
+                            #     self._update_config('echo', False)
                             if _is_crc_enable_cmd(buf):
                                 self._update_config('crc', True)
                             if self.crc:
@@ -954,9 +996,10 @@ class AtClient:
                             _complete_parsing(buf)
                         elif _is_crc(buf):
                             self._update_config('crc', True)
-                            if _has_echo(buf):
-                                self._update_config('echo', True)
-                                _remove_echo(buf)
+                            _handle_echo(buf)   # this should never happen
+                            # if _has_echo(buf):
+                            #     self._update_config('echo', True)
+                            #     _remove_echo(buf)
                             _complete_parsing(buf)
                         elif not self._cmd_pending:
                             # URC(s)
@@ -966,6 +1009,7 @@ class AtClient:
                             self._toggle_raw(False)
                             _log.debug('Assessing CR: %s',
                                        dprint(buf.decode(errors='replace')))
+                        
                         if _is_response(buf, verbose=False): # check for V0
                             if _has_echo(buf):
                                 self._update_config('echo', True)
@@ -980,16 +1024,17 @@ class AtClient:
                                 else:
                                     _complete_parsing(buf)
                         assert buf is not None
-                    elif isinstance(self._intermediate_prompt, str):
+                    elif isinstance(self._mid_prompt, str):
                         if _is_intermediate_result(buf):
                             if self._serial.in_waiting:
                                 _log.debug('Processing intermediate data')
                                 buf.extend(self._serial.read_all())
-                            if callable(self._intermediate_callback):
+                            if callable(self._mid_cb):
                                 _log.debug('Triggering intermediate callback %s',
-                                           self._intermediate_callback.__name__)
-                                self._intermediate_callback()
-                                self._intermediate_callback = None
+                                           self._mid_cb.__name__)
+                                self._mid_cb(*self._mid_cb_args,
+                                             **self._mid_cb_kwargs)
+                                self._reset_mid_cb()
             except (AtDecodeError, serial.SerialException) as err:
                 buf.clear()
                 _log.error('%s: %s', err.__class__.__name__, str(err))

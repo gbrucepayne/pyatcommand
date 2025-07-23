@@ -428,7 +428,19 @@ files = [
     {file = "typing_extensions-4.14.0.tar.gz", hash = "sha256:8676b788e32f02ab42d9e7c61324048ae4c6d844a399eebace3d4979d75ceef4"},
 ]
 
+[[package]]
+name = "xmodem"
+version = "0.4.7"
+description = "XMODEM protocol implementation."
+optional = false
+python-versions = "*"
+files = [
+    {file = "xmodem-0.4.7-py2.py3-none-any.whl", hash = "sha256:0842d2266175f01225053db721ea952b3f4b239cb3ace83c32b1daf90aa413af"},
+    {file = "xmodem-0.4.7-py3-none-any.whl", hash = "sha256:e6a2c7608f7b187da786c47780f8407dbc4ac2d3dfeb34fe683cc19778f01360"},
+    {file = "xmodem-0.4.7.tar.gz", hash = "sha256:2f1068aa8676f0d1d112498b5786c4f8ea4f89d8f25d07d3a0f293cd21db1c35"},
+]
+
 [metadata]
 lock-version = "2.0"
 python-versions = "^3.9"
-content-hash = "e00c06357b66d5d2529e45208a06b3fc48f8e92e5714fb39a487b2e26b38ca62"
+content-hash = "a7e90b908ad882163c925b27dd6d6bb0a836e95a22623c6c59b81960555b29c9"
