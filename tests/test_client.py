@@ -506,7 +506,7 @@ def test_intermediate_callback(bridge, simulator: ModemSimulator, cclient: AtCli
         logger.info('Received intermediate callback')
         simulator.intermediate_pause = False
     
-    mid_prompt = '\r'   # '>'
+    mid_prompt = '>'
     res = cclient.send_command('AT!INTERMEDIATE=X',
                                timeout=90,
                                mid_prompt=mid_prompt,

@@ -447,8 +447,11 @@ class AtClient:
             raise ValueError('Invalid rx_ready_wait')
         mid_prompt = kwargs.get('mid_prompt')
         if isinstance(mid_prompt, str):
-            if mid_prompt == '':
-                raise ValueError('Data mode prompt must be non-empty string')
+            if not mid_prompt or mid_prompt in ['\r', '\n', '\r\n']:
+                raise ValueError('Intermediate prompt must be ASCII'
+                                 ' and not exclusively control characters')
+            if len(mid_prompt) == 1:
+                _log.warning('Single-character prompt may be misinterpreted')
             self._mid_prompt = mid_prompt
         mid_cb = kwargs.get('mid_cb')
         if callable(mid_cb):
@@ -734,13 +737,14 @@ class AtClient:
                 i += 1
                 if char in (cr, lf):
                     if char == cr and next_char == lf:
-                        i += 1
+                        i += 1   # treat <cr><lf> as a single entry
                     lines.append(buffer[start:i])
                     start = i
             if start < len(buffer):
                 lines.append(buffer[start:])
             i = 0
             while i < len(lines):
+                # if <cr><lf> precedes a line then merge them
                 if lines[i] == cr+lf and i + 1 < len(lines):
                     lines[i] = lines[i] + lines[i+1]
                     del lines[i+1]
@@ -753,7 +757,7 @@ class AtClient:
                             _log.warning('Fixed missing V1 result header on %s',
                                          dprint(line.decode(errors='replace')))
                 elif line.endswith((b'0'+cr, b'4'+cr)) and len(line) > 2:
-                    if not self._cmd_pending or line != self._cmd_pending.encode():
+                    if not self._cmd_pending or not _has_echo(line):
                         lines[i] = line[:-2] + cr+lf
                         lines.insert(i+1, line[-2:])
                         if warnings:
@@ -795,10 +799,12 @@ class AtClient:
             Triggers a callback if `mid_prompt`
             ends or starts the buffer.
             """
-            if isinstance(self._mid_prompt, str):
+            if isinstance(self._mid_prompt, str) and len(self._mid_prompt) > 0:
                 prompt = self._mid_prompt.encode()
-                if prompt in buffer:  # and not _has_echo(buffer):
+                if prompt in buffer:
                     for line in _at_splitlines(buffer):
+                        if _has_echo(line):
+                            continue
                         if line.startswith(prompt) or line.endswith(prompt):
                             _log.debug('Found intermediate result %s in %s',
                                        dprint(self._mid_prompt),
@@ -967,6 +973,7 @@ class AtClient:
                     if not buf.strip():
                         continue   # keep reading data
                     last_char = buf[-1:]
+                    
                     if last_char == lf:
                         if vlog(VLOG_TAG + 'dev'):
                             self._toggle_raw(False)
@@ -974,12 +981,7 @@ class AtClient:
                                        dprint(buf.decode(errors='replace')))
                         if _is_response(buf, verbose=True):
                             self._update_config('verbose', True)
-                            _handle_echo(buf)  # this should never happen
-                            # if _has_echo(buf):
-                            #     self._update_config('echo', True)
-                            #     _remove_echo(buf)
-                            # elif self.echo:
-                            #     self._update_config('echo', False)
+                            _handle_echo(buf)  # could happen on block read
                             if _is_crc_enable_cmd(buf):
                                 self._update_config('crc', True)
                             if self.crc:
@@ -996,26 +998,19 @@ class AtClient:
                             _complete_parsing(buf)
                         elif _is_crc(buf):
                             self._update_config('crc', True)
-                            _handle_echo(buf)   # this should never happen
-                            # if _has_echo(buf):
-                            #     self._update_config('echo', True)
-                            #     _remove_echo(buf)
+                            _handle_echo(buf)   # could happen on block read
                             _complete_parsing(buf)
                         elif not self._cmd_pending:
                             # URC(s)
                             _complete_parsing(buf)
+                    
                     elif last_char == cr:
                         if vlog(VLOG_TAG + 'dev'):
                             self._toggle_raw(False)
                             _log.debug('Assessing CR: %s',
                                        dprint(buf.decode(errors='replace')))
-                        
                         if _is_response(buf, verbose=False): # check for V0
-                            if _has_echo(buf):
-                                self._update_config('echo', True)
-                                _remove_echo(buf)
-                            elif self.echo:
-                                self._update_config('echo', False)
+                            _handle_echo(buf)
                             peeked = self._serial.read(1)
                             if peeked != lf:   # V0 confirmed
                                 self._update_config('verbose', False)
@@ -1024,17 +1019,23 @@ class AtClient:
                                 else:
                                     _complete_parsing(buf)
                         assert buf is not None
-                    elif isinstance(self._mid_prompt, str):
-                        if _is_intermediate_result(buf):
-                            if self._serial.in_waiting:
-                                _log.debug('Processing intermediate data')
-                                buf.extend(self._serial.read_all())
-                            if callable(self._mid_cb):
-                                _log.debug('Triggering intermediate callback %s',
-                                           self._mid_cb.__name__)
-                                self._mid_cb(*self._mid_cb_args,
-                                             **self._mid_cb_kwargs)
-                                self._reset_mid_cb()
+                    
+                    elif (isinstance(self._mid_prompt, str) and
+                          _is_intermediate_result(buf)):
+                        if vlog(VLOG_TAG + 'dev'):
+                            self._toggle_raw(False)
+                            _log.debug('Checking for intermediate prompt: %s',
+                                       dprint(buf.decode(errors='replace')))
+                        if self._serial.in_waiting:
+                            _log.debug('Processing intermediate data')
+                            buf.extend(self._serial.read_all())
+                        if callable(self._mid_cb):
+                            _log.debug('Triggering intermediate callback %s',
+                                        self._mid_cb.__name__)
+                            self._mid_cb(*self._mid_cb_args,
+                                            **self._mid_cb_kwargs)
+                            self._reset_mid_cb()
+                            
             except (AtDecodeError, serial.SerialException) as err:
                 buf.clear()
                 _log.error('%s: %s', err.__class__.__name__, str(err))

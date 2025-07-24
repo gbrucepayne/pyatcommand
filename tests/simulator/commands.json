@@ -25,7 +25,7 @@
     "AT!V0NONCOMPLY?": {"response": "Missing trailer0\r"},
     "AT!ECHORACE?": {"response": "\r\n+URC: event data\r\nAT!ECHORACE?\r\r\n!ECHORACE: info\r\n\r\nOK\r\n", "hasEcho": true},
     "AT!RESURCRACE?": {"response": "AT!RESURCRACE?\r\r\n+URC: event data\r\n\r\n!RESURCRACE: response 1\r\nresponse 2\r\n\r\nOK\r\n", "hasEcho": true},
-    "AT!INTERMEDIATE=": {"intermediateResponse": "\r", "old_intermediateResponse": "\r\nINTERMEDIATE:>", "response": "\r\nOK\r\n", "intermediatePause": true},
+    "AT!INTERMEDIATE=": {"intermediateResponse": "\r\nINTERMEDIATE:>", "response": "\r\nOK\r\n", "intermediatePause": true},
     "AT+ISENDDATAMODE=1,32": {"intermediateResponse": "\r\n>", "enterDataMode": true, "exitDataMode": "<auto>", "exitResponse": "\r\nOK\r\n"},
     "AT+IRECVDATAMODE=1,1200": {"intermediateResponse": "\r\n+IRECVDATAMODE:4,0\r\n", "enterDataMode": true, "recvData": "Test recv intermediate data mode", "dataDelay": 1, "exitDataMode": "<auto>", "exitResponse": "\r\nOK\r\n"},
     "AT+CASWITCH=0,1": {"response": "\r\nOK\r\n", "enterDataMode": "\r\nCONNECT\r\n", "exitDataMode": "+++", "exitDelay": 1, "exitResponse": "\r\nOK\r\n"},
