@@ -6,7 +6,7 @@ import os
 import threading
 import time
 from queue import Empty, Queue
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Union
 
 import serial
 from dotenv import load_dotenv
@@ -577,15 +577,19 @@ class AtClient:
             at_response.info = '\n'.join(parts)
         return at_response
     
-    def send_bytes_data_mode(self, data: bytes, **kwargs) -> int:
+    def send_bytes_data_mode(self, data: bytes, **kwargs) -> Union[int, None]:
         """Send bytes in a streaming mode.
         
         May be modem-specific overridden in a subclass e.g. XMODEM
         
         Args:
-            data (bytes): The data to send
-            **auto (bool): If True, enables/disables data_mode around send
+            data (bytes): The data to send.
+            **auto (bool): If True, enables/disables data_mode around send.
+            **delay (float): Optional delay after sending for multi-thread.
         
+        Returns:
+            The number of bytes sent or None.
+            
         Raises:
             IOError if not in data mode.
             ValueError if data is not a valid bytes buffer.
@@ -599,12 +603,12 @@ class AtClient:
             raise IOError('Unable to stream in command mode')
         written = self._serial.write(data)
         self._serial.flush()
-        time.sleep(0.1)
+        time.sleep(float(kwargs.get('delay', 0)))
         if auto is True:
             self.data_mode = False
-        return written or 0
+        return written
     
-    def recv_bytes_data_mode(self, **kwargs) -> bytes:
+    def recv_bytes_data_mode(self, **kwargs) -> Union[bytes, None]:
         """Receive bytes in a streaming mode.
         
         May be modem-specific overridden in a subclass e.g. XMODEM
@@ -615,6 +619,9 @@ class AtClient:
             **size (int): Maximum bytes to read
             **auto (bool): If True, enable/disable data_mode around receive
         
+        Returns:
+            The bytes read, if any. Override may return None.
+            
         Raises:
             IOError if not in data mode.
         """
@@ -651,7 +658,7 @@ class AtClient:
             self._serial.timeout = restore_timeout
         if auto is True:
             self._data_mode = False
-        return bytes(data)
+        return bytes(data) or None
     
     def get_urc(self, timeout: Optional[float] = 0.1) -> Optional[str]:
         """Retrieves an Unsolicited Result Code if present.
