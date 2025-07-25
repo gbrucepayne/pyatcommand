@@ -8,10 +8,11 @@ sent/received, or a timeout.
 
 import logging
 import io
-from typing import Literal, Optional
+from typing import Literal, Optional, Union
 
 import serial
 from xmodem import XMODEM
+
 
 _log = logging.getLogger(__name__)
 
@@ -19,10 +20,28 @@ _log = logging.getLogger(__name__)
 def xmodem_bytes_handler(ser: serial.Serial,
                          direction: Literal['recv', 'send'],
                          data: Optional[bytes],
-                         **kwargs) -> Optional[bytes]:
+                         **kwargs) -> Union[bytes, bool]:
+    """Create a handler for XMODEM data transfer.
+    
+    Args:
+        ser (serial.Serial): The serial port to use.
+        direction (Literal): `send` or `recv`
+        data (bytes): If `send` this is the data to transmit.
+        **getc_timeout (float): The timeout seconds waiting for transfer request
+        (typically CRC `C`). (default 1)
+        **putc_timeout (float): The timeout seconds waiting for response to
+        other ACK/NACK (default 1).
+        **max_retries (int): The max number of retries (default 16)
+    
+    Returns:
+        Bytes if direction is `recv` or boolean for `send` success.
+    
+    Raises:
+        ValueError if no data is provided for `send`.
+    """
     getc_timeout = kwargs.get('getc_timeout', 1)
     putc_timeout = kwargs.get('putc_timeout', 1)
-    getc_retry = kwargs.get('getc_retry', 16)
+    max_retries = kwargs.get('max_retries', 16)
     log_level = logging.getLogger('xmodem').getEffectiveLevel()
     
     def getc(size: int, timeout: float = getc_timeout):
@@ -49,7 +68,7 @@ def xmodem_bytes_handler(ser: serial.Serial,
     if direction == 'recv':
         _log.debug('Starting XMODEM receive...')
         buf = io.BytesIO()
-        success = xmodem.recv(buf, timeout=getc_timeout, retry=getc_retry)
+        success = xmodem.recv(buf, timeout=getc_timeout, retry=max_retries)
         if success:
             received = buf.getvalue()
             _log.debug('XMODEM receive complete: %d bytes', len(received))
@@ -62,8 +81,9 @@ def xmodem_bytes_handler(ser: serial.Serial,
         if not data:
             raise ValueError('Send requires data bytes')
         buf = io.BytesIO(data)
-        if xmodem.send(buf, timeout=getc_timeout, retry=getc_retry):
+        success = xmodem.send(buf, timeout=getc_timeout, retry=max_retries)
+        if success:
             _log.debug('XMODEM sent %d bytes', buf.getbuffer().nbytes)
         else:
             _log.error('XMODEM send failed')
-
+        return success
