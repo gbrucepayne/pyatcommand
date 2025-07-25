@@ -1,26 +1,62 @@
 #!/usr/bin/env python
-"""A basic `socat` modem simulator with predefined responses to AT commands.
+"""A basic modem simulator with predefined responses to AT commands.
 
 DCE (Data Communications Equipment) represents the modem.
 DTE (Data Terminal Equipment) represents the computer talking to the modem.
+
+References a JSON file structured as:
+```
+{
+    "AT+COMMAND=X": {
+        "response": "\r\nOK\r\n",
+        "delay": null,
+        "hasEcho": false,
+        "intermediateResponse": null,
+        "intermediatePause": false,
+        "dataModeEntry": false,
+        "dataReply": null,
+        "dataDelay": null,
+        "dataModeExitSequence": "<auto>",
+        "dataExitDelay": null,
+        "dataModeExitResponse": null
+    }
+}
+```
+Where:
+- response (string) may include information responses and the final result code
+- delay (float) adds an optional delay to the response
+- hasEcho (boolean) indicates if response has the echo included
+- intermediateResponse (string) adds an intermediate before response or
+dataModeExitResponse, typically a pause for some input or output such as data mode
+- dataModeEntry (boolean|string) sends the string to the DTE before entering
+data mode, if true then no prompt is sent to the DTE
+- dataModeExitSequence (string) indicates an ASCII sequence that triggers exit
+from data mode, or the reserved <auto> means that data mode is exited when
+the data is complete or times out
+- dataReply (string) sends a response in data mode which encodes the ASCII
+string to send back to the DTE after entering data mode
+- dataExitDelay (float) adds delay between data mode exit and AT command mode
+- dataModeExitResponse (string) final AT response sent after exiting data mode.
+May be in addition to response in some cases.
 
 """
 
 import logging
 import json
 import os
-import signal
-import subprocess
+# import signal
+# import subprocess
 import threading
 import time
-import atexit
+# import atexit
 import string
 import re
 from typing import Callable, Optional, Union, Literal
 
 import serial
-from serial.tools.list_ports import comports
+# from serial.tools.list_ports import comports
 from pyatcommand import xmodem_bytes_handler
+from pyatcommand.common import dprint
 
 BAUDRATE = int(os.getenv('BAUDRATE', '9600'))
 DCE = os.getenv('DCE', './simdce')
@@ -41,55 +77,55 @@ class UnprintableException(Exception):
     """The decoded character is not printable."""
 
 
-class SerialBridge:
-    """A `socat` bridge between 2 physical and/or virtual serial ports."""
-    def __init__(self, dte: str = DTE, dce: str = DCE, baudrate: int = BAUDRATE) -> None:
-        self.dte: str = dte
-        self.dce: str = dce
-        self.baudrate: int = baudrate
-        self._stdout: 'bytes|None' = None
-        self._stderr: 'bytes|None' = None
-        self._process: subprocess.Popen = None
-        self._thread: threading.Thread = None
-        atexit.register(self.stop)
+# class SerialBridge:
+#     """A `socat` bridge between 2 physical and/or virtual serial ports."""
+#     def __init__(self, dte: str = DTE, dce: str = DCE, baudrate: int = BAUDRATE) -> None:
+#         self.dte: str = dte
+#         self.dce: str = dce
+#         self.baudrate: int = baudrate
+#         self._stdout: 'bytes|None' = None
+#         self._stderr: 'bytes|None' = None
+#         self._process: subprocess.Popen = None
+#         self._thread: threading.Thread = None
+#         atexit.register(self.stop)
     
-    def _socat(self):
-        # check if port exists else create pty
-        params = ',rawer,echo=0'
-        if not any(p.device == self.dce for p in comports()):
-            dce_params = 'pty' + params + f',link={self.dce}'
-        else:
-            dce_params = self.dce + params
-        if not any(p.device == self.dte for p in comports()):
-            dte_params = 'pty' + params + f',link={self.dte}'
-        else:
-            dte_params = self.dte + params
-        cmd = f'socat -d -d {dce_params} {dte_params}'
-        _log.debug('Executing: %s', cmd)
-        #TODO: revisit -v option?
-        self._process = subprocess.Popen(cmd,
-                                         stdout=subprocess.PIPE,
-                                         stderr=subprocess.PIPE,
-                                         shell=True,
-                                         preexec_fn=os.setsid)
-        self._stdout, self._stderr = self._process.communicate()
+#     def _socat(self):
+#         # check if port exists else create pty
+#         params = ',rawer,echo=0'
+#         if not any(p.device == self.dce for p in comports()):
+#             dce_params = 'pty' + params + f',link={self.dce}'
+#         else:
+#             dce_params = self.dce + params
+#         if not any(p.device == self.dte for p in comports()):
+#             dte_params = 'pty' + params + f',link={self.dte}'
+#         else:
+#             dte_params = self.dte + params
+#         cmd = f'socat -d -d {dce_params} {dte_params}'
+#         _log.debug('Executing: %s', cmd)
+#         #TODO: revisit -v option?
+#         self._process = subprocess.Popen(cmd,
+#                                          stdout=subprocess.PIPE,
+#                                          stderr=subprocess.PIPE,
+#                                          shell=True,
+#                                          preexec_fn=os.setsid)
+#         self._stdout, self._stderr = self._process.communicate()
         
-    def start(self):
-        """Start the simulated serial interface."""
-        self._thread = threading.Thread(target=self._socat,
-                                        name='serial_bridge',
-                                        daemon=True)
-        self._thread.start()
-        time.sleep(SOCAT_SETUP_DELAY_S)
+#     def start(self):
+#         """Start the simulated serial interface."""
+#         self._thread = threading.Thread(target=self._socat,
+#                                         name='serial_bridge',
+#                                         daemon=True)
+#         self._thread.start()
+#         time.sleep(SOCAT_SETUP_DELAY_S)
     
-    def stop(self):
-        try:
-            # self._process.kill()
-            os.killpg(os.getpgid(self._process.pid), signal.SIGTERM)
-            if self._stderr:
-                _log.error('%s', self._stderr)
-        except Exception as err:
-            _log.error('Serial bridge stop: %s', err)
+#     def stop(self):
+#         try:
+#             # self._process.kill()
+#             os.killpg(os.getpgid(self._process.pid), signal.SIGTERM)
+#             if self._stderr:
+#                 _log.error('%s', self._stderr)
+#         except Exception as err:
+#             _log.error('Serial bridge stop: %s', err)
 
 
 class ModemSimulator:
@@ -143,7 +179,7 @@ class ModemSimulator:
     def start(self,
               port: str = DCE,
               baudrate: int = None,
-              command_file: str = None,
+              command_file: str = COMMAND_FILE,
               ):
         if self._running:
             return
@@ -259,7 +295,7 @@ class ModemSimulator:
             
             request = self._request
             responses = self.commands
-            _log.debug('Processing command: %s', _debugf(request))
+            _log.debug('Processing command: %s', dprint(request))
             echo = self._request + self.terminator if self.echo else ''
             intermediate_response = ''
             enter_data_mode: Union[bool, str, None] = None
@@ -292,18 +328,18 @@ class ModemSimulator:
                 if res_meta.get('hasEcho') is True:
                     echo = ''
                 intermediate_response = res_meta.get('intermediateResponse', '')
-                data_mode_send = res_meta.get('recvData', '').encode()
+                data_mode_send = res_meta.get('dataReply', '').encode()
                 use_xmodem = res_meta.get('xmodem', False)
                 data_delay = res_meta.get('dataDelay', 0)
                 response = res_meta.get('response', '')
                 response_delay = res_meta.get('delay', 0)
                 
-                enter_data_mode = res_meta.get('enterDataMode')
+                enter_data_mode = res_meta.get('dataModeEntry')
                 if enter_data_mode:
                     _log.debug('Command triggers data mode')
-                    self._data_mode_exit = res_meta.get('exitDataMode')
-                    self._data_mode_exit_res = res_meta.get('exitResponse')
-                    self._data_mode_exit_delay = res_meta.get('exitDelay', 0)
+                    self._data_mode_exit = res_meta.get('dataModeExitSequence')
+                    self._data_mode_exit_res = res_meta.get('dataModeExitResponse')
+                    self._data_mode_exit_delay = res_meta.get('dataExitDelay', 0)
                     if (not self._data_mode_exit or
                         not self._data_mode_exit_res):
                         raise ValueError('Data mode exit not defined'
@@ -323,7 +359,7 @@ class ModemSimulator:
                 response = VRES_ERR if self.verbose else RES_ERR
 
             if echo:
-                _log.debug('Sending echo: %s', _debugf(echo))
+                _log.debug('Sending echo: %s', dprint(echo))
                 self._ser.write(echo.encode())
                 self._ser.flush()
             
@@ -341,8 +377,8 @@ class ModemSimulator:
                 self.intermediate_pause = res_meta.get('intermediatePause', False)
                 paused = self.intermediate_pause
                 _log.info('Sending intermediate response to %s: %s',
-                            _debugf(request),
-                            _debugf(intermediate_response))
+                            dprint(request),
+                            dprint(intermediate_response))
                 self._ser.write(intermediate_response.encode())
                 self._ser.flush()
                 time.sleep(0.1)
@@ -402,8 +438,8 @@ class ModemSimulator:
                     to_write.insert(bad_byte_offset, bad_byte)
                 
                 _log.debug('Sending final response to %s: %s',
-                           _debugf(request or 'data mode exit'),
-                           _debugf(to_write.decode(errors='backslashreplace')))
+                           dprint(request or 'data mode exit'),
+                           dprint(to_write.decode(errors='backslashreplace')))
                 self._ser.write(to_write)
                 self._ser.flush()
                 time.sleep(0.1)
@@ -437,7 +473,7 @@ class ModemSimulator:
                 self._handle_data_mode_rx()
             elif self._data_mode_exit_res:
                 _log.debug('Sending final response after data mode exit: %s',
-                           _debugf(self._data_mode_exit_res))
+                           dprint(self._data_mode_exit_res))
                 self._ser.write(self._data_mode_exit_res.encode())
                 self._data_mode_exit_res = None
             else:
@@ -452,7 +488,7 @@ class ModemSimulator:
             urc = f'\r\n{urc}\r\n'
         else:
             urc = f'{v0_header}{urc}\r\n'
-        _log.debug('Sending URC: %s', _debugf(urc))
+        _log.debug('Sending URC: %s', dprint(urc))
         self._ser.write(urc.encode())
         self._ser.flush()
     
@@ -463,7 +499,7 @@ class ModemSimulator:
         else:
             chained = '\r\n'.join(f'{v0_header}{urc}' for urc in urcs)
         chained += '\r\n'
-        _log.debug('Sending chained URCS: %s', _debugf(chained))
+        _log.debug('Sending chained URCS: %s', dprint(chained))
         self._ser.write(chained.encode())
         self._ser.flush()
     
@@ -476,62 +512,6 @@ class ModemSimulator:
             self._ser.close()
             self._ser = None
             
-
-# def xmodem_bytes_handler(ser: serial.Serial,
-#                          direction: Literal['recv', 'send'],
-#                          data: Optional[bytes],
-#                          **kwargs) -> Optional[bytes]:
-#     getc_timeout = kwargs.get('getc_timeout', 1)
-#     putc_timeout = kwargs.get('putc_timeout', 1)
-#     getc_retry = kwargs.get('getc_retry', 16)
-#     log_level = logging.getLogger('xmodem').getEffectiveLevel()
-    
-#     def getc(size: int, timeout: float = getc_timeout):
-#         original_timeout = ser.timeout
-#         ser.timeout = timeout
-#         data = ser.read(size)
-#         ser.timeout = original_timeout
-#         if log_level == logging.DEBUG:
-#             _log.debug('Read (timeout=%0.1f): %r', timeout, data)
-#         return data if data else None
-    
-#     def putc(data: bytes, timeout: float = putc_timeout):
-#         original_timeout = ser.write_timeout
-#         ser.write_timeout = timeout
-#         ser.write(data)
-#         ser.flush()
-#         ser.write_timeout = original_timeout
-#         if log_level == logging.DEBUG:
-#             _log.debug('Write (timeout=%0.1f): %r', timeout, data)
-#         return len(data)
-    
-#     xmodem = XMODEM(getc, putc)
-    
-#     if direction == 'recv':
-#         _log.debug('Starting XMODEM receive...')
-#         buf = io.BytesIO()
-#         success = xmodem.recv(buf, timeout=getc_timeout, retry=getc_retry)
-#         if success:
-#             received = buf.getvalue()
-#             _log.debug('XMODEM receive complete: %d bytes', len(received))
-#             return received
-#         else:
-#             _log.error('XMODEM receive failed')
-#             return b''
-    
-#     elif direction == 'send':
-#         if not data:
-#             raise ValueError('Send requires data bytes')
-#         buf = io.BytesIO(data)
-#         if xmodem.send(buf, timeout=getc_timeout, retry=getc_retry):
-#             _log.debug('XMODEM sent %d bytes', buf.getbuffer().nbytes)
-#         else:
-#             _log.error('XMODEM send failed')
-
-
-def _debugf(debug_str: str) -> str:
-    return debug_str.replace('\r', '<cr>').replace('\n', '<lf>')
-
 
 def loopback_test(ser: serial.Serial) -> bool:
     if not ser.is_open:
@@ -561,6 +541,8 @@ def loopback_test(ser: serial.Serial) -> bool:
 
 
 if __name__ == '__main__':
+    from .serialbridge import SerialBridge
+    
     print('>>>> Starting simulator')
     logging.basicConfig(level=logging.DEBUG)
     bridge = None
