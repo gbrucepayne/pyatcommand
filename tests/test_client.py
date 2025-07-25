@@ -1,227 +1,47 @@
 """Unit test cases for AtClient."""
 import logging
 import os
-import queue
 import random
 import threading
 import time
-from unittest.mock import Mock, patch  # noqa: F401
-from typing import Callable, Optional, Literal
 
 import pytest
-import serial
 
-from pyatcommand import AtErrorCode, AtTimeout, AtClient, xmodem_bytes_handler
+from pyatcommand import AtErrorCode, AtTimeout, AtClient
 from pyatcommand.common import list_available_serial_ports
 
-from .simulator.socat import COMMAND_FILE, DTE, ModemSimulator, SerialBridge
+from simulator import ModemSimulator, SerialBridge
 
 logger = logging.getLogger(__name__)
 
 REAL_UART = os.getenv('REAL_UART')
 
 
-@pytest.fixture
-def log_verbose():
-    """Configure environment-based logging"""
-    os.environ['LOG_VERBOSE'] = 'atclientdev'
-    # os.environ['AT_RAW'] = 'true'
-
-
-class MockSerial:
-    """Mock replacement for serial.Serial to simulate serial communication."""
-    def __init__(self, *args, **kwargs):
-        self._read_buffer = queue.Queue()
-        self._response = []
-        self._lock = threading.Lock()
-        self.is_open = True
-        self.echo = kwargs.pop('echo', True)
-        self.delay = 0
-        self.timeout = kwargs.get('timeout', None)
-        self.baudrate = kwargs.get('baudrate', 9600)
-    
-    def write(self, data: bytes):
-        """Simulate writing data to the serial interface."""
-        time.sleep(self.delay)
-        with self._lock:
-            if self.echo:
-                for byte in data:
-                    self._read_buffer.put(byte)
-            if not self._response or len(self._response) == 0:
-                self._response = b'\r\nOK\r\n'
-            for byte in self._response:
-                self._read_buffer.put(byte)
-            self._response = b''
-    
-    def read(self, size=1) -> bytes:
-        """Simulate reading data from serial interface."""
-        result = b''
-        with self._lock:
-            for _ in range(size):
-                if not self._read_buffer.empty():
-                    result += bytes([self._read_buffer.get()])
-        return result
-    
-    def read_until(self, expected=b'\n', size=None) -> bytes:
-        """Simulate serial.read_until"""
-        result = bytearray()
-        expected_len = len(expected)
-        deadline = time.time() + self.timeout if self.timeout else None
-        while True:
-            if self._read_buffer.empty():
-                if self.timeout:
-                    if time.time() >= deadline:
-                        break
-                time.sleep(0.01)
-                continue
-            result.append(self._read_buffer.get())
-            if size and len(result) >= size:
-                break
-            if result[-expected_len:] == expected:
-                break
-        return bytes(result)
-    
-    @property
-    def in_waiting(self) -> int:
-        return self._read_buffer.qsize()
-    
-    def flush(self):
-        """Stub flushing the write queue."""
-        return
-    
-    def close(self):
-        """Simulate closing the port."""
-        self.is_open = False
-    
-    def reset_output_buffer(self):
-        """Simulate clearing the Tx buffer."""
-    
-    def reset_buffers(self):
-        """Clear the simulated buffers"""
-        with self._lock:
-            while not self._read_buffer.empty():
-                self._read_buffer.get()
-    
-    def set_response(self, data: bytes):
-        with self._lock:
-            self._response = data
-
-
-@pytest.fixture
-def mock_serial():
-    with patch('serial.Serial', new=MockSerial) as mock:
-        yield mock
-
-
-@pytest.fixture
-def client():
-    return AtClient()
-
-
-@pytest.fixture
-def cclient():
-    """Connected client"""
+def test_connect(bridge: SerialBridge, simulator: ModemSimulator):
     client = AtClient()
-    client.connect(port=DTE, retry_timeout=5)
-    yield client
-    client.disconnect()
-
-
-class XmodemClient(AtClient):
-    """A class for testing XMODEM handling."""
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self._binary_handler: Optional[Callable[[bytes], None]] = None
-
-    def set_binary_handler(self,
-                           handler: Callable[[serial.Serial, Literal['recv', 'send'], Optional[bytes]], None],
-                           direction: Literal['recv', 'send'] = 'recv',
-                           data: Optional[bytes] = None):
-        """Assign a handler to run in data mode."""
-        self._binary_handler = lambda ser: handler(ser, direction, data)
-    
-    def close_binary_handler(self):
-        self._binary_handler = None
-        
-    def send_bytes_data_mode(self, data, **kwargs) -> int:
-        dce = kwargs.get('dce')
-        if isinstance(dce, ModemSimulator):
-            dce.intermediate_pause = False
-        self.set_binary_handler(xmodem_bytes_handler,
-                                direction='send',
-                                data=data)
-        self.data_mode = True
-        self._binary_handler(self._serial)
-        self.data_mode = False
-        self._binary_handler = None
-    
-    def recv_bytes_data_mode(self, **kwargs) -> bytes:
-        data_callback = kwargs.get('data_callback')
-        strip = kwargs.get('strip', False)
-        dce = kwargs.get('dce')
-        if isinstance(dce, ModemSimulator):
-            dce.intermediate_pause = False
-        self.set_binary_handler(xmodem_bytes_handler,
-                                direction='recv')
-        self.data_mode = True
-        data = self._binary_handler(self._serial)
-        self.data_mode = False
-        self._binary_handler = None
-        if strip is True:
-            data = data.rstrip(b'\x1a')
-        if callable(data_callback):
-            data_callback(data)
-        else:
-            logger.warning('No callback provided for data: %r', data)
-
-
-@pytest.fixture
-def xclient():
-    """Connected client with xmodem data mode"""
-    client = XmodemClient()
-    client.connect(port=DTE, retry_timeout=5)
-    yield client
-    client.close_binary_handler()
-    client.disconnect()
-
-
-@pytest.fixture
-def bridge():
-    bridge = SerialBridge()
-    bridge.start()
-    yield bridge
-    bridge.stop()
-
-
-@pytest.fixture
-def simulator():
-    simulator = ModemSimulator()
-    simulator.start(command_file=COMMAND_FILE)
-    yield simulator
-    simulator.stop()
-
-
-def test_connect(log_verbose, bridge: SerialBridge, simulator: ModemSimulator, client: AtClient):
-    client.connect(port=DTE, retry_timeout=2)
+    client.connect(port=bridge.dte, retry_timeout=2)
     assert client.is_connected()
     client.disconnect()
 
 
-def test_connect_no_port(client: AtClient):
+def test_connect_no_port():
+    client = AtClient()
     with pytest.raises(ConnectionError) as excinfo:
         client.connect()
     assert 'invalid or missing' in str(excinfo.value).lower()
 
 
-def test_connect_invalid_port(client: AtClient):
+def test_connect_invalid_port():
+    client = AtClient()
     with pytest.raises(ConnectionError) as excinfo:
         client.connect(port='COM99')
     assert 'unable to open' in str(excinfo.value).lower()
 
 
-def test_connect_no_response(bridge, client: AtClient):
+def test_connect_no_response(bridge: SerialBridge):
+    client = AtClient()
     with pytest.raises(ConnectionError) as excinfo:
-        client.connect(port=DTE, retry_timeout=2)
+        client.connect(port=bridge.dte, retry_timeout=2)
     assert 'timed out' in str(excinfo.value).lower()
 
 
@@ -244,7 +64,7 @@ def test_autobaud(log_verbose):
     client.disconnect()
 
 
-def test_echo_autodetect(bridge, simulator: ModemSimulator, cclient: AtClient):
+def test_echo_autodetect(simulator: ModemSimulator, cclient: AtClient):
     assert cclient.echo is True
     simulator.echo = False
     cclient.send_command('AT')
@@ -254,7 +74,7 @@ def test_echo_autodetect(bridge, simulator: ModemSimulator, cclient: AtClient):
     assert cclient.echo is True
 
 
-def test_verbose_autodetect(bridge, simulator: ModemSimulator, cclient: AtClient):
+def test_verbose_autodetect(simulator: ModemSimulator, cclient: AtClient):
     assert cclient.verbose is True
     simulator.verbose = False
     cclient.send_command('AT')
@@ -264,13 +84,13 @@ def test_verbose_autodetect(bridge, simulator: ModemSimulator, cclient: AtClient
     assert cclient.verbose is True
 
 
-def test_send_command(bridge, simulator, cclient: AtClient):
+def test_send_command(simulator, cclient: AtClient):
     at_response = cclient.send_command('AT+GMI')
     assert at_response.ok
     assert isinstance(at_response.info, str)
 
 
-def test_non_verbose(bridge, simulator: ModemSimulator, cclient: AtClient):
+def test_non_verbose(simulator: ModemSimulator, cclient: AtClient):
     """Test responses with V0"""
     v0_response = cclient.send_command('ATV0')
     assert v0_response.ok is True
@@ -280,7 +100,7 @@ def test_non_verbose(bridge, simulator: ModemSimulator, cclient: AtClient):
     assert isinstance(at_response.info, str) and len(at_response.info) > 0
 
 
-def test_send_command_crc(bridge, simulator, cclient: AtClient, caplog):
+def test_send_command_crc(simulator, cclient: AtClient, caplog):
     cclient.crc_enable = 'AT%CRC=1'
     assert cclient.crc_disable == 'AT%CRC=0'
     assert cclient.crc is False
@@ -305,7 +125,7 @@ def test_send_command_crc(bridge, simulator, cclient: AtClient, caplog):
     assert cclient.crc is False
 
 
-def test_command_prefix(bridge, simulator, cclient: AtClient):
+def test_command_prefix(simulator, cclient: AtClient):
     command = 'AT+CGDCONT?'
     prefix = '+CGDCONT:'
     at_response = cclient.send_command(command)
@@ -315,7 +135,7 @@ def test_command_prefix(bridge, simulator, cclient: AtClient):
     assert len(at_response.info) > 0 and prefix not in at_response.info
 
 
-def test_get_urc(bridge, simulator: ModemSimulator, cclient:AtClient):
+def test_get_urc(simulator: ModemSimulator, cclient:AtClient):
     urc = '+URC: Test'
     simulator.inject_urc(urc)
     received = False
@@ -329,7 +149,7 @@ def test_get_urc(bridge, simulator: ModemSimulator, cclient:AtClient):
     assert received == urc
 
 
-def test_multiline(bridge, simulator: ModemSimulator, cclient: AtClient):
+def test_multiline(simulator: ModemSimulator, cclient: AtClient):
     """Multiline responses"""
     response = cclient.send_command('ATI')
     assert response.ok and len(response.info.split('\n')) > 1
@@ -338,7 +158,7 @@ def test_multiline(bridge, simulator: ModemSimulator, cclient: AtClient):
     assert response_2.info.split('\n') == single_crlf_spacer_response
 
 
-def test_multi_urc(bridge, simulator: ModemSimulator, cclient: AtClient):
+def test_multi_urc(simulator: ModemSimulator, cclient: AtClient):
     urcs = [
         '%NOTIFY:"RRCSTATE",2',
         '%NOTIFY:"RRCSTATE",0',
@@ -353,7 +173,7 @@ def test_multi_urc(bridge, simulator: ModemSimulator, cclient: AtClient):
     assert received_count == len(urcs)
 
 
-def test_multi_urc_v0(bridge, simulator: ModemSimulator, cclient: AtClient):
+def test_multi_urc_v0(simulator: ModemSimulator, cclient: AtClient):
     simulator.verbose = False
     urcs = [
         '%NOTIFY:"RRCSTATE",2',
@@ -377,7 +197,7 @@ def test_multi_urc_v0(bridge, simulator: ModemSimulator, cclient: AtClient):
     assert received_count == len(urcs)
 
 
-def test_urc_send_race(bridge, simulator: ModemSimulator, cclient: AtClient):
+def test_urc_send_race(simulator: ModemSimulator, cclient: AtClient):
     """Try to emulate a command being sent while a URC is processing."""
     long_urc = '+LONGURC: ' + 'x' * 25
     chained_urcs = [long_urc] * 3
@@ -431,13 +251,13 @@ def test_thread_safety(mock_serial):
     interface.disconnect()
 
 
-def test_cme_error(bridge, simulator: ModemSimulator, cclient: AtClient):
+def test_cme_error(simulator: ModemSimulator, cclient: AtClient):
     at_response = cclient.send_command('AT+CMEE=4')
     assert at_response.ok is False
     assert at_response.info == 'invalid configuration'
 
 
-def test_timeout(bridge, simulator, cclient: AtClient):
+def test_timeout(simulator, cclient: AtClient):
     timeout_cmd = 'AT!TIMEOUT?'
     delay = 3
     timeout = 1
@@ -450,14 +270,14 @@ def test_timeout(bridge, simulator, cclient: AtClient):
     assert at_response.ok
 
 
-def test_bad_byte(bridge, simulator, cclient: AtClient, caplog):
+def test_bad_byte(simulator, cclient: AtClient, caplog):
     for p in ['B', 'M', 'E']:
         res = cclient.send_command(f'AT!BAD_BYTE_{p}?', timeout=2)
         assert res.ok is True
         assert any('invalid char' in message.lower() for message in caplog.messages)
 
 
-def test_response_plus_urc(bridge, simulator, cclient: AtClient):
+def test_response_plus_urc(simulator, cclient: AtClient):
     """What happens when one or more URCs immediately follow a response."""
     cmd_res = cclient.send_command('AT!MUDDLE?', timeout=5)
     assert cmd_res.ok is True
@@ -468,7 +288,7 @@ def test_response_plus_urc(bridge, simulator, cclient: AtClient):
     assert urc_found is True
 
 
-def test_noncompliant_response(bridge, simulator, cclient: AtClient, log_verbose):
+def test_noncompliant_response(simulator, cclient: AtClient, log_verbose):
     """Check noncompliant response handling."""
     # Seen on Murata/Sony response to AT%GETACFG="ntn.conf.gnss_in_use"
     at_response = cclient.send_command('AT!NONCOMPLY?')
@@ -482,7 +302,7 @@ def test_noncompliant_response(bridge, simulator, cclient: AtClient, log_verbose
     assert at_response.info == 'Missing trailer'
 
 
-def test_urc_echo_race(bridge, simulator, cclient: AtClient, log_verbose):
+def test_urc_echo_race(simulator, cclient: AtClient, log_verbose):
     """Case when URC arrives as AT command is being sent, before echo received."""
     # disable echo on simulator to create test response
     simulator.echo = False
@@ -490,7 +310,7 @@ def test_urc_echo_race(bridge, simulator, cclient: AtClient, log_verbose):
     assert at_response.ok is True
 
 
-def test_urc_response_race(bridge, simulator, cclient: AtClient, log_verbose):
+def test_urc_response_race(simulator, cclient: AtClient, log_verbose):
     """Case when URC arrives after command but before response."""
     # Seen on Murata/Sony with +CEREG output between command and response
     at_response = cclient.send_command('AT!RESURCRACE?', prefix='!RESURCRACE:', timeout=3)
@@ -499,7 +319,7 @@ def test_urc_response_race(bridge, simulator, cclient: AtClient, log_verbose):
     assert urc is not None
 
 
-def test_intermediate_callback(bridge, simulator: ModemSimulator, cclient: AtClient, log_verbose, caplog):
+def test_intermediate_callback(simulator: ModemSimulator, cclient: AtClient, log_verbose, caplog):
     """Case when an intermediate result triggers a callback."""
     
     def icb():
@@ -518,7 +338,7 @@ def test_intermediate_callback(bridge, simulator: ModemSimulator, cclient: AtCli
     )
 
 
-def test_send_bytes_data_mode_intermediate(bridge, simulator: ModemSimulator, cclient: AtClient, log_verbose, caplog):
+def test_send_bytes_data_mode_intermediate(simulator: ModemSimulator, cclient: AtClient, log_verbose, caplog):
     """Send data where an intermediate result triggers data mode in between final result.
     
     Example: SIMCOM SIM7070G modem
@@ -542,7 +362,7 @@ def test_send_bytes_data_mode_intermediate(bridge, simulator: ModemSimulator, cc
     simulator.data_mode = False
 
 
-def test_recv_bytes_data_mode_intermediate(bridge, simulator: ModemSimulator, cclient: AtClient, log_verbose, caplog):
+def test_recv_bytes_data_mode_intermediate(simulator: ModemSimulator, cclient: AtClient, log_verbose, caplog):
     """Receive data where an intermediate result triggers data mode in between final result.
     
     Example: Skywave IDP modem (ignoring xmodem implementation)
@@ -570,7 +390,7 @@ def test_recv_bytes_data_mode_intermediate(bridge, simulator: ModemSimulator, cc
     assert received_bytes == expected
 
 
-def test_send_bytes_data_mode_sequential(bridge, simulator: ModemSimulator, cclient: AtClient, log_verbose, caplog):
+def test_send_bytes_data_mode_sequential(simulator: ModemSimulator, cclient: AtClient, log_verbose, caplog):
     """Case where the command triggers data mode after the final result.
     
     Example: Simcom SIM7070 switch to transparent mode
@@ -580,31 +400,29 @@ def test_send_bytes_data_mode_sequential(bridge, simulator: ModemSimulator, ccli
     data_mode_exit_sequence = b'+++'
     res = cclient.send_command('AT+CASWITCH=0,1', timeout=90)
     time.sleep(0.25)   # allow simulator and URC to process
-    if res.ok:
-        deadline = time.time() + 2
-        while cclient.get_urc() != 'CONNECT':
-            if time.time() > deadline:
-                raise IOError('Timed out waiting for data mode prompt')
-            time.sleep(0.1)
-        cclient.data_mode = True
-        logger.debug('Sending data')
-        cclient.send_bytes_data_mode(test_data)
-        time.sleep(1)   # delay for processing by simulator
-        logger.debug('Sending exit sequence')
-        cclient.send_bytes_data_mode(data_mode_exit_sequence)
-        time.sleep(1)
-        assert simulator.data_mode is False
-        cclient.data_mode = False
-        time.sleep(0.1)   # allow simulator to process
-        assert simulator.data_mode_data == test_data
-        simulator.data_mode_data.clear()
-        assert cclient.get_urc() == 'OK'
-        assert cclient.send_command('AT').ok
-    else:
-        assert False
+    assert res.ok is True
+    deadline = time.time() + 2
+    while cclient.get_urc() != 'CONNECT':
+        if time.time() > deadline:
+            raise IOError('Timed out waiting for data mode prompt')
+        time.sleep(0.1)
+    cclient.data_mode = True
+    logger.debug('Sending data')
+    cclient.send_bytes_data_mode(test_data)
+    time.sleep(1)   # delay for processing by simulator
+    logger.debug('Sending exit sequence')
+    cclient.send_bytes_data_mode(data_mode_exit_sequence)
+    time.sleep(1)
+    assert simulator.data_mode is False
+    cclient.data_mode = False
+    time.sleep(0.1)   # allow simulator to process
+    assert simulator.data_mode_data == test_data
+    simulator.data_mode_data.clear()
+    assert cclient.get_urc() == 'OK'
+    assert cclient.send_command('AT').ok
 
 
-def test_recv_bytes_data_mode_sequential(bridge, simulator: ModemSimulator, cclient: AtClient, log_verbose, caplog):
+def test_recv_bytes_data_mode_sequential(simulator: ModemSimulator, cclient: AtClient, log_verbose, caplog):
     """Receive data where modem is switched in and out of data mode by commands.
     
     Example: Simcom SIM7070 transparent mode
@@ -637,8 +455,8 @@ def test_recv_bytes_data_mode_sequential(bridge, simulator: ModemSimulator, ccli
         assert False
 
 
-def test_send_xmodem(bridge, simulator: ModemSimulator, xclient: XmodemClient):
-    """"""
+def test_send_xmodem(simulator: ModemSimulator, xclient: AtClient):
+    """Test case for data mode using XMODEM protocol."""
     logging.getLogger('xmodem').setLevel(logging.DEBUG)
     data_to_send = b'Test sending XMODEM data'
     resp = xclient.send_command(f'AT+XMODEMSEND={len(data_to_send)}',
@@ -651,8 +469,13 @@ def test_send_xmodem(bridge, simulator: ModemSimulator, xclient: XmodemClient):
     assert simulator.data_mode_data == data_to_send
 
 
-def test_recv_xmodem(bridge, simulator: ModemSimulator, xclient: XmodemClient, log_verbose):
-    """"""
+def test_recv_xmodem(simulator: ModemSimulator, xclient: AtClient, log_verbose):
+    """Test case for receiving data using XMODEM protocol.
+    
+    DTE uses an intermediate result from the DCE that it has entered data mode.
+    An alternate approach would be a final result then explicit call to
+    `recv_bytes_data_mode`.
+    """
     expected = b'Test receiving XMODEM data'
     
     def data_callback(data: bytes):
@@ -671,7 +494,10 @@ def test_recv_xmodem(bridge, simulator: ModemSimulator, xclient: XmodemClient, l
     assert resp.ok is True
 
 
-def test_legacy_response(bridge: SerialBridge, simulator: ModemSimulator, cclient: AtClient):
+# Legacy test cases -----------------------------------------------------------
+
+@pytest.mark.legacy
+def test_legacy_response(simulator: ModemSimulator, cclient: AtClient):
     assert cclient.send_at_command('AT+GMI', timeout=3) == AtErrorCode.OK
     response = cclient.get_response()
     assert response == 'Simulated Modems Inc'
@@ -683,13 +509,15 @@ def test_legacy_response(bridge: SerialBridge, simulator: ModemSimulator, cclien
     assert response == ''
 
 
-def test_legacy_response_prefix(bridge: SerialBridge, simulator: ModemSimulator, cclient: AtClient):
+@pytest.mark.legacy
+def test_legacy_response_prefix(simulator: ModemSimulator, cclient: AtClient):
     assert cclient.send_at_command('AT+CGDCONT?', timeout=3) == AtErrorCode.OK
     response = cclient.get_response('+CGDCONT:')
     assert isinstance(response, str) and len(response) > 0 and '+CGDCONT' not in response
 
 
-def test_legacy_check_urc(bridge, simulator: ModemSimulator, cclient: AtClient):
+@pytest.mark.legacy
+def test_legacy_check_urc(simulator: ModemSimulator, cclient: AtClient):
     urc = '+URC: Test'
     simulator.inject_urc(urc)
     received = False
@@ -704,7 +532,8 @@ def test_legacy_check_urc(bridge, simulator: ModemSimulator, cclient: AtClient):
     assert cclient.get_response() == urc
 
     
-def test_legacy_then_urc(bridge, simulator: ModemSimulator, cclient: AtClient):
+@pytest.mark.legacy
+def test_legacy_then_urc(simulator: ModemSimulator, cclient: AtClient):
     urc = '+URC: Test'
     assert cclient.send_at_command('AT+GMI', timeout=3) == AtErrorCode.OK
     assert cclient.is_response_ready() is True
@@ -745,7 +574,8 @@ def test_legacy_then_urc(bridge, simulator: ModemSimulator, cclient: AtClient):
     assert cclient.get_response() == urc
 
 
-def test_legacy_cme_error(bridge, simulator: ModemSimulator, cclient: AtClient, log_verbose):
+@pytest.mark.legacy
+def test_legacy_cme_error(simulator: ModemSimulator, cclient: AtClient, log_verbose):
     assert cclient.send_at_command('AT+CMEE=4') == AtErrorCode.CME_ERROR
     assert cclient.is_response_ready() is True
     res = cclient.get_response()
@@ -754,7 +584,8 @@ def test_legacy_cme_error(bridge, simulator: ModemSimulator, cclient: AtClient, 
     assert cclient.get_response(clean=False) == '\r\n+CME ERROR: invalid configuration\r\n'
 
 
-def test_legacy_urc_response_race(bridge, simulator, cclient: AtClient, log_verbose):
+@pytest.mark.legacy
+def test_legacy_urc_response_race(simulator, cclient: AtClient, log_verbose):
     """Case when URC arrives after command but before response."""
     # Seen on Murata/Sony with +CEREG output between command and response
     assert cclient.send_at_command('AT!RESURCRACE?', timeout=3) == AtErrorCode.OK
