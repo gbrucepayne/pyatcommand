@@ -19,7 +19,7 @@ _log = logging.getLogger(__name__)
 
 def xmodem_bytes_handler(ser: serial.Serial,
                          direction: Literal['recv', 'send'],
-                         data: Optional[bytes],
+                         data: Optional[bytes] = None,
                          **kwargs) -> Union[bytes, bool]:
     """Create a handler for XMODEM data transfer.
     
