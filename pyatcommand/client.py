@@ -794,10 +794,6 @@ class AtClient:
                           (any(last.strip().startswith(cmx)
                                for cmx in cmx_error_prefixes) and
                            last.endswith(cr)))
-            if result and vlog(VLOG_TAG):
-                _log.debug('Found %s response: %s',
-                           'V1' if verbose else 'V0',
-                           dprint(buffer.decode(errors='replace')))
             return result
         
         def _is_intermediate_result(buffer: bytearray) -> bool:
@@ -987,8 +983,11 @@ class AtClient:
                             _log.debug('Assessing LF: %s',
                                        dprint(buf.decode(errors='replace')))
                         if _is_response(buf, verbose=True):
+                            if vlog(VLOG_TAG):
+                                _log.debug('Found V1 response: %s',
+                                           dprint(buf.decode(errors='replace')))
                             self._update_config('verbose', True)
-                            _handle_echo(buf)  # could happen on block read
+                            _handle_echo(buf)
                             if _is_crc_enable_cmd(buf):
                                 self._update_config('crc', True)
                             if self.crc:
@@ -1005,7 +1004,9 @@ class AtClient:
                             _complete_parsing(buf)
                         elif _is_crc(buf):
                             self._update_config('crc', True)
-                            _handle_echo(buf)   # could happen on block read
+                            if _has_echo(buf):
+                                _log.warning('Echo should already be removed')
+                                _handle_echo(buf)
                             _complete_parsing(buf)
                         elif not self._cmd_pending:
                             # URC(s)
@@ -1017,10 +1018,13 @@ class AtClient:
                             _log.debug('Assessing CR: %s',
                                        dprint(buf.decode(errors='replace')))
                         if _is_response(buf, verbose=False): # check for V0
-                            _handle_echo(buf)
                             peeked = self._serial.read(1)
                             if peeked != lf:   # V0 confirmed
+                                if vlog(VLOG_TAG):
+                                    _log.debug('Found V0 response: %s',
+                                               dprint(buf.decode(errors='replace')))
                                 self._update_config('verbose', False)
+                                _handle_echo(buf)
                                 if peeked == crc_sep:
                                     self._update_config('crc', True)
                                 else:

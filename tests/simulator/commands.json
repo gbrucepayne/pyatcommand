@@ -31,5 +31,6 @@
     "AT+CASWITCH=0,1": {"response": "\r\nOK\r\n", "dataModeEntry": "\r\nCONNECT\r\n", "dataModeExitSequence": "+++", "dataExitDelay": 1, "dataModeExitResponse": "\r\nOK\r\n"},
     "AT+CASWITCH=1,1": {"response": "\r\nOK\r\n", "dataModeEntry": "\r\nCONNECT\r\n", "dataReply": "Test recv switched data mode", "dataDelay": 1, "dataModeExitSequence": "+++", "dataModeExitResponse": "\r\nOK\r\n"},
     "AT+XMODEMSEND=": {"xmodem": true, "dataModeEntry": true, "dataModeExitSequence": "<auto>", "dataModeExitResponse": "\r\nOK\r\n"},
-    "AT+XMODEMRECV=": {"xmodem": true, "intermediateResponse": "\r\n+XMODEMRECV:", "dataModeEntry": true, "dataReply": "Test receiving XMODEM data", "dataModeExitSequence": "<auto>", "dataModeExitResponse": "\r\nOK\r\n"}
+    "AT+XMODEMRECV=": {"xmodem": true, "intermediateResponse": "\r\n+XMODEMRECV:", "dataModeEntry": true, "dataReply": "Test receiving XMODEM data", "dataModeExitSequence": "<auto>", "dataModeExitResponse": "\r\nOK\r\n"},
+    "AT!V0LIKE?": {"response": "\r\n!V0LIKE: 0\r\n\r\nOK\r\n"}
 }

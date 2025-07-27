@@ -494,6 +494,15 @@ def test_recv_xmodem(simulator: ModemSimulator, xclient: AtClient, log_verbose):
     assert resp.ok is True
 
 
+def test_false_config_detect(simulator, cclient: AtClient, log_verbose):
+    """Checks the case where response looks similar to V0 response."""
+    resp = cclient.send_command('AT!V0LIKE?', prefix='!V0LIKE:')
+    assert resp.ok is True
+    assert resp.info == '0'
+    assert cclient.echo is True
+    assert cclient.verbose is True
+
+
 # Legacy test cases -----------------------------------------------------------
 
 @pytest.mark.legacy
