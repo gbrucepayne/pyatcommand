@@ -15,6 +15,7 @@ from xmodem import XMODEM
 
 
 _log = logging.getLogger(__name__)
+logging.getLogger('xmodem').setLevel(logging.WARNING)
 
 
 def xmodem_bytes_handler(ser: serial.Serial,
