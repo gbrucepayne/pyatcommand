@@ -33,6 +33,44 @@ _log = logging.getLogger(__name__)
 
 class AtClient:
     """A class for interfacing to a modem from a client device."""
+    
+    # slots placeholder unused to allow subclasses without slots
+    # __slots__ = (
+    #     "_supported_baudrates",
+    #     "_port",
+    #     "_baudrate",
+    #     "_is_debugging_raw",
+    #     "_config",
+    #     "_autoconfig",
+    #     "_serial",
+    #     "_rx_timeout",
+    #     "_lock",
+    #     "_listener_thread",
+    #     "_rx_running",
+    #     "_rx_buf",
+    #     "_rx_peeked",
+    #     "_response_queue",
+    #     "_unsolicited_queue",
+    #     "_exception_queue",
+    #     "_wait_no_rx_data",
+    #     "_cmd_pending",
+    #     "_command_timeout",
+    #     "_is_initialized",
+    #     "_rx_ready",
+    #     "_crc_enable",
+    #     "_crc_disable",
+    #     "_auto_crc",
+    #     "_legacy_response",
+    #     "_legacy_response_ready",
+    #     "_legacy_cmd_error",
+    #     "allow_unprintable_ascii",
+    #     "_data_mode",
+    #     "_mid_prompt",
+    #     "_mid_cb",
+    #     "_mid_cb_args",
+    #     "_mid_cb_kwargs",
+    # )
+    
     def __init__(self, **kwargs) -> None:
         """Instantiate a modem client interface.
         
@@ -212,24 +250,24 @@ class AtClient:
         self._config.terminator = value
     
     @property
-    def cme_err(self) -> str:
+    def _cme_prefix(self) -> str:
         """The prefix for CME errors."""
         return '+CME ERROR:'
     
     @property
-    def res_V1(self) -> list[str]:
+    def _res_V1(self) -> list[str]:
         """Get the set of verbose result codes compatible with startswith."""
         CRLF = f'{self._config.cr}{self._config.lf}'
         return [ f'{CRLF}OK{CRLF}', f'{CRLF}ERROR{CRLF}' ]
     
     @property
-    def res_V0(self) -> list[str]:
+    def _res_V0(self) -> list[str]:
         """Get the set of non-verbose result codes."""
         return [ f'0{self._config.cr}', f'4{self._config.cr}' ]
     
     @property
-    def result_codes(self) -> list[str]:
-        return self.res_V0 + self.res_V1
+    def _result_codes(self) -> list[str]:
+        return self._res_V0 + self._res_V1
     
     @property
     def command_pending(self) -> str:
@@ -433,6 +471,8 @@ class AtClient:
             `ConnectionError` if the receive buffer is blocked.
             `AtTimeout` if no response received within timeout.
         """
+        if not self._serial:
+            raise ConnectionError('No serial connection')
         if not isinstance(command, str) or not command:
             raise ValueError('Invalid command')
         if self.data_mode:
@@ -451,7 +491,8 @@ class AtClient:
                 raise ValueError('Intermediate prompt must be ASCII'
                                  ' and not exclusively control characters')
             if len(mid_prompt) == 1:
-                _log.warning('Single-character prompt may be misinterpreted')
+                _log.debug('Intermediate prompt %s may be misinterpreted',
+                           mid_prompt)
             self._mid_prompt = mid_prompt
         mid_cb = kwargs.get('mid_cb')
         if callable(mid_cb):
@@ -527,6 +568,7 @@ class AtClient:
         return cmd + terminator
     
     def _reset_mid_cb(self):
+        """Reset the intermediate prompt settings."""
         self._mid_prompt = None
         self._mid_cb = None
         self._mid_cb_args = ()
@@ -709,8 +751,8 @@ class AtClient:
         cr = self._config.cr.encode()
         lf = self._config.lf.encode()
         crc_sep = self._config.crc_sep.encode()
-        res_V1 = [r.encode() for r in self.res_V1]
-        res_V0 = [r.encode() for r in self.res_V0]
+        res_V1 = [r.encode() for r in self._res_V1]
+        res_V0 = [r.encode() for r in self._res_V0]
         cmx_error_prefixes = (b'+CME ERROR:', b'+CMS ERROR:')
         crc_sep = self.crc_sep.encode()
         
