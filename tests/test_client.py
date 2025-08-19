@@ -503,6 +503,17 @@ def test_false_config_detect(simulator, cclient: AtClient, log_verbose):
     assert cclient.verbose is True
 
 
+def test_long_res_ending_0(simulator, cclient: AtClient, log_verbose):
+    """Checks longer responses suspected of misinterpretation as URC.
+    
+    Orbcomm/SkyWave modem responses sometimes not processing.
+    Seems to be certain commands ending in ,0 get split partway.
+    """
+    for _ in range(100):
+        resp = cclient.send_command('AT%REGINFO', prefix='%REGINFO:')
+        assert resp.ok and resp.info is not None
+
+
 # Legacy test cases -----------------------------------------------------------
 
 @pytest.mark.legacy
