@@ -4,10 +4,12 @@ import os
 import random
 import threading
 import time
+from unittest.mock import patch, MagicMock
 
 import pytest
+from serial import SerialException, Serial
 
-from pyatcommand import AtErrorCode, AtTimeout, AtClient
+from pyatcommand import AtTimeout, AtClient
 from pyatcommand.common import list_available_serial_ports
 
 from simulator import ModemSimulator, SerialBridge
@@ -514,101 +516,19 @@ def test_long_res_ending_0(simulator, cclient: AtClient, log_verbose):
         assert resp.ok and resp.info is not None
 
 
-# Legacy test cases -----------------------------------------------------------
-
-@pytest.mark.legacy
-def test_legacy_response(simulator: ModemSimulator, cclient: AtClient):
-    assert cclient.send_at_command('AT+GMI', timeout=3) == AtErrorCode.OK
-    response = cclient.get_response()
-    assert response == 'Simulated Modems Inc'
-    assert cclient.send_at_command('ATI') == AtErrorCode.OK
-    response = cclient.get_response()
-    assert response == 'First line\nSecond line'
-    assert cclient.send_at_command('AT') == AtErrorCode.OK
-    response = cclient.get_response()
-    assert response == ''
-
-
-@pytest.mark.legacy
-def test_legacy_response_prefix(simulator: ModemSimulator, cclient: AtClient):
-    assert cclient.send_at_command('AT+CGDCONT?', timeout=3) == AtErrorCode.OK
-    response = cclient.get_response('+CGDCONT:')
-    assert isinstance(response, str) and len(response) > 0 and '+CGDCONT' not in response
-
-
-@pytest.mark.legacy
-def test_legacy_check_urc(simulator: ModemSimulator, cclient: AtClient):
-    urc = '+URC: Test'
-    simulator.inject_urc(urc)
-    received = False
-    start_time = time.time()
-    while not received and time.time() - start_time < 10:
-        received = cclient.check_urc()
-        if not received:
-            time.sleep(0.1)
-    if received:
-        logger.info('URC latency %0.1f seconds', time.time() - start_time)
-    assert received is True
-    assert cclient.get_response() == urc
-
+@pytest.mark.parametrize('exc_type', [SerialException, OSError])
+def test_listen_exceptions(simulator, cclient: AtClient, exc_type):
+    assert cclient.send_command('AT').ok
+    assert cclient.get_urc() is None
     
-@pytest.mark.legacy
-def test_legacy_then_urc(simulator: ModemSimulator, cclient: AtClient):
-    urc = '+URC: Test'
-    assert cclient.send_at_command('AT+GMI', timeout=3) == AtErrorCode.OK
-    assert cclient.is_response_ready() is True
-    response = cclient.get_response()
-    assert cclient.is_response_ready() is False
-    assert response == 'Simulated Modems Inc'
-    assert cclient.ready
-    simulator.inject_urc(urc)
-    received = False
-    start_time = time.time()
-    while not received and time.time() - start_time < 10:
-        received = cclient.check_urc()
-        if not received:
-            time.sleep(0.1)
-    if received:
-        logger.info('URC latency %0.1f seconds', time.time() - start_time)
-    assert received is True
-    assert cclient.is_response_ready() is True
-    assert cclient.get_response() == urc
-    assert cclient.is_response_ready() is False
-    assert cclient.send_at_command('AT+GMI', timeout=3) == AtErrorCode.OK
-    response = cclient.get_response()
-    assert response == 'Simulated Modems Inc'
-    # send command without information response
-    assert cclient.send_at_command('ATZ') == AtErrorCode.OK
-    assert cclient.is_response_ready() is False
-    simulator.inject_urc(urc)
-    received = False
-    start_time = time.time()
-    while not received and time.time() - start_time < 10:
-        received = cclient.check_urc()
-        if not received:
-            time.sleep(0.1)
-    if received:
-        logger.info('URC latency %0.1f seconds', time.time() - start_time)
-    assert received is True
-    assert cclient.is_response_ready() is True
-    assert cclient.get_response() == urc
-
-
-@pytest.mark.legacy
-def test_legacy_cme_error(simulator: ModemSimulator, cclient: AtClient, log_verbose):
-    assert cclient.send_at_command('AT+CMEE=4') == AtErrorCode.CME_ERROR
-    assert cclient.is_response_ready() is True
-    res = cclient.get_response()
-    assert res == 'invalid configuration'
-    cclient.send_at_command('AT+CMEE=4')
-    assert cclient.get_response(clean=False) == '\r\n+CME ERROR: invalid configuration\r\n'
-
-
-@pytest.mark.legacy
-def test_legacy_urc_response_race(simulator, cclient: AtClient, log_verbose):
-    """Case when URC arrives after command but before response."""
-    # Seen on Murata/Sony with +CEREG output between command and response
-    assert cclient.send_at_command('AT!RESURCRACE?', timeout=3) == AtErrorCode.OK
-    response = cclient.get_response('!RESURCRACE:')
-    assert len(response) > 0
-    assert cclient.check_urc() is True
+    mock_serial = MagicMock()
+    type(mock_serial).in_waiting = property(lambda self: 1)
+    mock_serial.read_until.side_effect = exc_type('Simulated disconnect')
+    cclient._serial = mock_serial
+    
+    with patch.object(cclient, '_handle_serial_lost') as mock_handle_lost:
+        for _ in range(20):
+            if mock_handle_lost.called:
+                break
+            time.sleep(0.05)
+        assert mock_handle_lost.called

@@ -93,7 +93,8 @@ class AtClient:
         self._config: AtConfig = AtConfig()
         self._autoconfig: bool = kwargs.get('autoconfig', True)
         self._serial: Optional[serial.Serial] = None
-        self._rx_timeout: Optional[float] = kwargs.get('timeout', 0)
+        self._rx_timeout: Optional[float] = kwargs.get('timeout', 0.1)
+        self._tx_timeout: Optional[float] = kwargs.get('write_timeout', 2)
         self._lock = threading.Lock()
         self._listener_thread: Optional[threading.Thread] = None
         self._rx_running: bool = False
@@ -323,6 +324,8 @@ class AtClient:
         try:
             if 'timeout' not in kwargs:
                 kwargs['timeout'] = self._rx_timeout
+            if 'write_timeout' not in kwargs:
+                kwargs['write_timeout'] = self._tx_timeout
             self._serial = serial.Serial(self._port, self._baudrate, **kwargs)
             self._rx_running = True
             self._listener_thread = threading.Thread(target=self._listen,
@@ -428,8 +431,9 @@ class AtClient:
         """Diconnect from the serial port"""
         self._rx_running = False
         self._is_initialized = False
-        if self._listener_thread is not None:
-            self._listener_thread.join()
+        if self._listener_thread and self._listener_thread.is_alive():
+            self._listener_thread.join(timeout=1)
+            self._listener_thread = None
         if self._serial:
             self._serial.close()
             self._serial = None
@@ -463,15 +467,18 @@ class AtClient:
             **mid_prompt (str): If present, the intermediate result
                 code or prompt that triggers the `mid_cb`.
                 It can start or finish the response line.
-            **mid_cb (Callable[[],None]): If present, triggers a
+            **mid_cb (Callable[...,None]): If present, triggers a
                 callback function for the caller when the prompt is received.
+            **mid_cb_args (tuple): If present, the arguments passed to `mid_cb`.
+            **mid_cb_kwargs (dict[str, Any]): If present, the keyword arguments
+                passed to `mid_cb`.
         
         Raises:
             `ValueError` if command is not a valid string or timeout is invalid.
             `ConnectionError` if the receive buffer is blocked.
             `AtTimeout` if no response received within timeout.
         """
-        if not self._serial:
+        if not self._serial or not self._serial.is_open:
             raise ConnectionError('No serial connection')
         if not isinstance(command, str) or not command:
             raise ValueError('Invalid command')
@@ -531,10 +538,10 @@ class AtClient:
                        timeout, dprint(self._cmd_pending))
             if self._debug_raw():
                 print(f'{AT_RAW_TX_TAG}{dprint(self._cmd_pending)}')
-            self._serial.write(full_cmd.encode())
-            self._serial.flush()
-            start_time = time.time()
             try:
+                self._serial.write(full_cmd.encode())
+                self._serial.flush()
+                start_time = time.time()
                 if timeout is None:
                     _log.warning(f'{command} timeout None may orphan response')
                     return AtResponse()
@@ -551,12 +558,15 @@ class AtClient:
                     err_msg = f'Command timed out: {command} ({timeout} s)'
                     _log.warning(err_msg)
                     raise AtTimeout(err_msg)
+            except (serial.SerialException, OSError) as exc:
+                self._handle_serial_lost(exc)
+                raise            
             finally:
                 self._cmd_pending = ''
                 if self._mid_prompt is not None:
                     self._reset_mid_cb()
                 if self._data_mode:
-                    _log.warning('Auto-revert from data to command mode')
+                    _log.debug('Auto-revert from data to command mode')
                     self._data_mode = False
     
     def _prepare_command(self, cmd: str) -> str:
@@ -699,6 +709,7 @@ class AtClient:
         if temp_timeout:
             self._serial.timeout = restore_timeout
         if auto is True:
+            _log.debug('Auto-revert from data to command mode')
             self._data_mode = False
         return bytes(data) or None
     
@@ -711,6 +722,12 @@ class AtClient:
         Returns:
             The URC string if present or None.
         """
+        try:
+            exc = self._exception_queue.get_nowait()
+        except Empty:
+            exc = None
+            if exc:
+                raise exc
         try:
             return self._unsolicited_queue.get(timeout=timeout).strip()
         except Empty:
@@ -996,7 +1013,7 @@ class AtClient:
                     _log.debug('RX ready')
                 return True
         
-        while self._rx_running and self._serial and self._rx_ready.is_set():
+        while self._rx_running:
             try:
                 while self._serial.in_waiting > 0 or peeked:
                     if self._data_mode:
@@ -1089,134 +1106,35 @@ class AtClient:
                                             **self._mid_cb_kwargs)
                             self._reset_mid_cb()
                             
-            except (AtDecodeError, serial.SerialException) as err:
+            except (serial.SerialException, OSError) as exc:
                 buf.clear()
-                _log.error('%s: %s', err.__class__.__name__, str(err))
-                self._exception_queue.put(err)
                 if self._cmd_pending:
-                    self._response_queue.put(None)
-                if isinstance(err, serial.SerialException):
-                    self.disconnect()
+                    self._response_queue.put(None)   # trigger send_command handling
+                conn_exc = ConnectionError(*exc.args)
+                self._handle_serial_lost(conn_exc)
+            
             time.sleep(self._wait_no_rx_data)   # Prevent CPU overuse
             if not self._rx_ready.is_set():
                 if vlog(VLOG_TAG):
                     _log.warning('Set RX ready after no data for %0.2fs',
                                  self._wait_no_rx_data)
                 self._rx_ready.set()
+        
+        _log.debug('Lister exited')
 
-    #--- Legacy interface support ---#
-    
-    def send_at_command(self,
-                        at_command: str,
-                        timeout: float = AT_TIMEOUT,
-                        **kwargs) -> AtErrorCode:
-        """Send an AT command and parse the response
-        
-        Call `get_response()` next to retrieve information responses.
-        Backward compatible for legacy integrations.
-        
-        Args:
-            at_command (str): The command to send
-            timeout (float): The maximum time to wait for a response.
-        
-        Returns:
-            `AtErrorCode` indicating success (0) or failure
-        """
+    def _handle_serial_lost(self, exc: Optional[Exception] = None):
+        """Handle a serial connection loss."""
+        if exc:
+            _log.error('Serial connection lost: %s %s', 
+                       exc.__class__.__name__, exc)
+            self._exception_queue.put(exc)
+        self._rx_running = False
+        self._rx_ready.set()   # ensure any waiting threads unblock
         try:
-            response = self.send_command(at_command, timeout)
-            self._legacy_cmd_error = response.result
-            if response.info:
-                reconstruct = response.info.replace('\n', '\r\n')
-                if response.result in [AtErrorCode.CME_ERROR,
-                                       AtErrorCode.CMS_ERROR]:
-                    prefix = response.result.name.replace('_', ' ')
-                    reconstruct = f'+{prefix}: {reconstruct}'
-                if self.verbose:
-                    reconstruct = f'\r\n{reconstruct}'
-                reconstruct = f'{reconstruct}\r\n'
-                self._legacy_response = reconstruct
-                self._legacy_response_ready = True
-        except AtTimeout:
-            self._legacy_cmd_error = AtErrorCode.ERR_TIMEOUT
-        return self._legacy_cmd_error
+            self.disconnect()
+        except Exception as inner_exc:
+            _log.warning('Error disconnecting: %s', inner_exc)
     
-    def is_response_ready(self) -> bool:
-        """Check if a response is waiting to be retrieved.
-        
-        Backward compatible for legacy integrations.
-        """
-        return self._legacy_response_ready
-    
-    def get_response(self, prefix: str = '', clean: bool = True) -> str:
-        """Retrieve the response (or URC) from the Rx buffer and clear it.
-        
-        Backward compatible for legacy integrations.
-        
-        Args:
-            prefix: If specified removes the first instance of the string
-            clean: If False include all non-printable characters
-        
-        Returns:
-            Information response or URC from the buffer.
-        """
-        header = self._config.header
-        trailer_result = self._config.trailer_result
-        trailer_info = self._config.trailer_info
-        res = self._legacy_response
-        if prefix:
-            if not res.strip().startswith(prefix) and prefix in res:
-                lines = [line.strip() 
-                         for line in res.split(trailer_result) if line]
-                while not lines[0].startswith(prefix):
-                    urc = f'{header}{lines.pop(0)}{trailer_result}'
-                    self._unsolicited_queue.put(urc)
-                    _log.warning('Found pre-response URC: %s', dprint(urc))
-                res = f'{header}{(trailer_info).join(lines)}{trailer_result}'
-            elif not res.strip().startswith(prefix):
-                _log.warning('Prefix %s not found', prefix)
-            res = res.replace(prefix, '', 1)
-            if vlog(VLOG_TAG):
-                _log.debug('Removed prefix (%s): %s',
-                           dprint(prefix), dprint(res))
-        if clean:
-            res = res.strip().replace('\r\n', '\n')
-            if res.startswith(('+CME', '+CMS')):
-                res = res.split(': ', 1)[1]
-        self._legacy_response = ''
-        self._legacy_response_ready = False
-        return res
-    
-    def check_urc(self, **kwargs) -> bool:
-        """Check for an unsolicited result code.
-        
-        Call `get_response()` next to retrieve the code if present.
-        Backward compatible for legacy integrations.
-        
-        Returns:
-            `True` if a URC was found.
-        """
-        if self._unsolicited_queue.qsize() == 0:
-            return False
-        if self._legacy_response_ready:
-            return True
-        try:
-            self._legacy_response = self._unsolicited_queue.get(block=False)
-            self._legacy_response_ready = True
-            return True
-        except Empty:
-            _log.error('Unexpected error getting unsolicited from queue')
-        return False
-
-    def last_error_code(self, clear: bool = False) -> 'AtErrorCode|None':
-        """Get the last error code.
-        
-        Backward compatible for legacy integrations.
-        """
-        tmp = self._legacy_cmd_error
-        if clear:
-            self._legacy_cmd_error = None
-        return tmp
-
     #--- Raw debug mode for detailed interface analysis ---#
     
     def _debug_raw(self) -> bool:
