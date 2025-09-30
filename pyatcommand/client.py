@@ -20,7 +20,7 @@ from .common import (
     vlog,
 )
 from .crcxmodem import apply_crc, validate_crc
-from .exception import AtDecodeError, AtTimeout
+from .exception import AtTimeout
 
 load_dotenv()
 

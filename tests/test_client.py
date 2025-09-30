@@ -7,7 +7,7 @@ import time
 from unittest.mock import patch, MagicMock
 
 import pytest
-from serial import SerialException, Serial
+from serial import SerialException
 
 from pyatcommand import AtTimeout, AtClient
 from pyatcommand.common import list_available_serial_ports
