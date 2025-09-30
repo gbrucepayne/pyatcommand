@@ -214,35 +214,35 @@ class ModemSimulator:
         self._last_data_mode_rx_time = 0
     
     def _handle_data_mode_rx(self):
-        now = time.time()
+        now = time.monotonic()
         rx_data = self._ser.read(self._ser.in_waiting or 1)
+        exit_seq = self._data_mode_exit.encode() if self._data_mode_exit else None
         if not rx_data:
+            if (self._data_mode_exit_start and 
+                self.data_mode_data.endswith(exit_seq)):
+                idle = (now - self._last_data_mode_rx_time)
+                # _log.debug('Idle = %0.2f', idle)
+                if idle >= self._data_mode_exit_delay:
+                    _log.debug('Exit sequence detected after %0.2fs', idle)
+                    # Remove exit sequence from received data
+                    self.data_mode_data = self.data_mode_data[:-len(exit_seq)]
+                    self._reset_data_mode_state()
             return
-        _log.debug('Data mode received %d bytes at %0.1f', len(rx_data), now)
+        _log.debug('Data mode received %d bytes at %0.1f: %r',
+                   len(rx_data), now, rx_data)
         for b in rx_data:
+            self._last_data_mode_rx_time = now
             self.data_mode_data.append(b)
-            if not self._data_mode_exit:
-                self._last_data_mode_rx_time = now
+            if not exit_seq:
                 continue
-            expected = self._data_mode_exit.encode()
-            expected_byte = expected[self._data_mode_exit_match_idx]
+            expected_byte = exit_seq[self._data_mode_exit_match_idx]
             if b == expected_byte:
+                _log.debug('Assessing exit byte %d: %d == %d',
+                           self._data_mode_exit_match_idx, b, expected_byte)
                 if self._data_mode_exit_match_idx == 0:
                     self._data_mode_exit_start = now
                     _log.debug('Started exit sequence matching at %0.2f', now)
                 self._data_mode_exit_match_idx += 1
-                if self._data_mode_exit_match_idx == len(expected):
-                    idle = (self._data_mode_exit_start - self._last_data_mode_rx_time)
-                    if idle >= self._data_mode_exit_delay:
-                        _log.debug('Exit sequence detected after %0.2fs', idle)
-                        # Remove exit sequence from received data
-                        self.data_mode_data = self.data_mode_data[:-len(expected)]
-                        self._reset_data_mode_state()
-                        return
-                    else:
-                        _log.debug('Exit sequence ignored - idle only %0.2fs',
-                                   idle)
-                        self._data_mode_exit_match_idx = 0
             else:
                 if self._data_mode_exit_match_idx > 0:
                     _log.debug('Exit sequence broken - reset match')
@@ -252,6 +252,7 @@ class ModemSimulator:
         if self._data_mode_exit == '<auto>' and not self._ser.in_waiting:
             _log.debug('Auto exit from data mode')
             self._reset_data_mode_state()
+        
         # time.sleep(0.1)
     
     def _handle_data_mode_tx(self,
@@ -478,6 +479,7 @@ class ModemSimulator:
                 self._data_mode_exit_res = None
             else:
                 self._handle_command_mode()
+            # time.sleep(0.1)
     
     def inject_urc(self, urc: str, v0_header: str = '\r\n'):
         """Inject an unsolicited response code."""
@@ -522,8 +524,8 @@ def loopback_test(ser: serial.Serial) -> bool:
     response: str = ''
     _log.info('Sending test command: %s', test_command)
     ser.write(f'{test_command}\r'.encode())
-    start_time = time.time()
-    while (not success and time.time() - start_time < timeout):
+    start_time = time.monotonic()
+    while (not success and time.monotonic() - start_time < timeout):
         if ser.in_waiting > 0:
             b = ser.read()
             try:
