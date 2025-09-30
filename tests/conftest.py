@@ -14,6 +14,8 @@ import serial
 from pyatcommand import AtClient, xmodem_bytes_handler
 from simulator import SerialBridge, ModemSimulator
 
+TEARDOWN_DELAY = 0.1
+
 
 class MockSerial:
     """Mock replacement for serial.Serial to simulate serial communication."""
@@ -114,13 +116,14 @@ def mock_serial() -> Generator[serial.Serial, None, None]:
         yield mock
 
 
-@pytest.fixture(scope='session')
+@pytest.fixture #(scope='session')
 def bridge() -> Generator[SerialBridge, None, None]:
     """Simulated serial bridge shared across tests."""
     bridge = SerialBridge()
     bridge.start()
     yield bridge
     bridge.stop()
+    time.sleep(TEARDOWN_DELAY)
 
 
 @pytest.fixture
@@ -130,6 +133,7 @@ def simulator(bridge: SerialBridge) -> Generator[ModemSimulator, None, None]:
     sim.start(port=bridge.dce)
     yield sim
     sim.stop()
+    time.sleep(TEARDOWN_DELAY)
 
 
 @pytest.fixture
@@ -139,6 +143,7 @@ def cclient(bridge: SerialBridge) -> Generator[AtClient, None, None]:
     client.connect(port=bridge.dte, retry_timeout=5)
     yield client
     client.disconnect()
+    time.sleep(TEARDOWN_DELAY)
 
 
 class XmodemClient(AtClient):
