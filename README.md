@@ -103,6 +103,7 @@ e.g. `client.crc_enable = 'AT%CRC=1'`.
 The corresponding disable string can either be derived as the numeric zero of
 the enabler, or manually set using the `crc_disable` property.
 
+<!--
 ### Lecacy Client
 
 The original version of this library operated as follows and is supported.
@@ -161,6 +162,7 @@ formatting character have been received or timeout (default 1 second
 `AT_URC_TIMEOUT`).
 URC data is placed in the *get* buffer and retrieved in the same way as a
 commmand response.
+-->
 
 ### CRC support
 
