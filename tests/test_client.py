@@ -79,10 +79,12 @@ def test_echo_autodetect(simulator: ModemSimulator, cclient: AtClient):
 def test_verbose_autodetect(simulator: ModemSimulator, cclient: AtClient):
     assert cclient.verbose is True
     simulator.verbose = False
-    cclient.send_command('AT')
+    time.sleep(0.1)
+    cclient.send_command('AT', timeout=1)
     assert cclient.verbose is False
     simulator.verbose = True
-    cclient.send_command('AT')
+    time.sleep(0.1)
+    cclient.send_command('AT', timeout=1)
     assert cclient.verbose is True
 
 
@@ -100,6 +102,42 @@ def test_non_verbose(simulator: ModemSimulator, cclient: AtClient):
     at_response = cclient.send_command('AT+GMI')
     assert at_response.ok is True
     assert isinstance(at_response.info, str) and len(at_response.info) > 0
+
+
+@pytest.mark.parametrize('verbose_val', ['', 'atclient', 'atclientdev'])
+def test_debug_at_raw(simulator, cclient: AtClient, capsys, caplog, monkeypatch, verbose_val):
+    from pyatcommand.client import AT_RAW_RX_TAG, AT_RAW_TX_TAG
+    monkeypatch.setenv('AT_RAW', 'true')
+    if verbose_val:
+        monkeypatch.setenv('LOG_VERBOSE', verbose_val)
+    caplog.set_level(logging.DEBUG)
+    res = cclient.send_command('AT', timeout=120)
+    assert res.ok
+    expected = res.info
+    time.sleep(0.2)
+    out, err = capsys.readouterr()
+    logged = [x for x in caplog.text.splitlines() if 'pyatcommand' in x]
+    printed = [x for x in out.splitlines() if x]
+    assert 'Sending command' in logged[0]
+    assert printed[0].startswith(AT_RAW_TX_TAG)
+    assert printed[0].endswith('AT<cr>')
+    for resline in printed[1:]:
+        assert resline.startswith(AT_RAW_RX_TAG)
+        assert resline.endswith(('<cr>', '<cr><lf>'))
+    if expected:
+        expected = expected.split('\n')
+        for line in expected:
+            assert any(line in x for x in printed[1:])
+    if 'atclient' in verbose_val:
+        assert any('Processed response' in log for log in logged)
+    else:
+        assert not any('Processed response' in log for log in logged)
+    if 'atclientdev' in verbose_val:
+        assert any('Assessing' in log for log in logged)
+    else:
+        assert not any('Assessing' in log for log in logged)
+    for raw in printed:
+        assert raw not in logged
 
 
 def test_send_command_crc(simulator, cclient: AtClient, caplog):
@@ -283,11 +321,11 @@ def test_response_plus_urc(simulator, cclient: AtClient):
     """What happens when one or more URCs immediately follow a response."""
     cmd_res = cclient.send_command('AT!MUDDLE?', timeout=5)
     assert cmd_res.ok is True
-    urc_found = False
+    urc_found = None
     while not urc_found:
         time.sleep(0.1)
-        urc_found = cclient.check_urc()
-    assert urc_found is True
+        urc_found = cclient.get_urc()
+    assert urc_found is not None
 
 
 def test_noncompliant_response(simulator, cclient: AtClient, log_verbose):
@@ -377,7 +415,7 @@ def test_recv_bytes_data_mode_intermediate(simulator: ModemSimulator, cclient: A
         logger.info('Processing data mode receive callback')
         cclient.data_mode = True
         time.sleep(0.1)   # yield to simulator to send data
-        received_bytes = cclient.recv_bytes_data_mode(timeout=2)
+        received_bytes = cclient.recv_bytes_data_mode(size=len(expected), timeout=2)
         logger.info('Received %d bytes in data mode', len(received_bytes))
         cclient.data_mode = False
         time.sleep(0.1)   # yield to simulator to send closure
@@ -413,8 +451,8 @@ def test_send_bytes_data_mode_sequential(simulator: ModemSimulator, cclient: AtC
     cclient.send_bytes_data_mode(test_data)
     time.sleep(1)   # delay for processing by simulator
     logger.debug('Sending exit sequence')
-    cclient.send_bytes_data_mode(data_mode_exit_sequence)
-    time.sleep(1)
+    assert cclient.send_bytes_data_mode(data_mode_exit_sequence) == len(data_mode_exit_sequence)
+    time.sleep(1.25)
     assert simulator.data_mode is False
     cclient.data_mode = False
     time.sleep(0.1)   # allow simulator to process
@@ -521,10 +559,11 @@ def test_listen_exceptions(simulator, cclient: AtClient, exc_type):
     assert cclient.send_command('AT').ok
     assert cclient.get_urc() is None
     
-    mock_serial = MagicMock()
-    type(mock_serial).in_waiting = property(lambda self: 1)
-    mock_serial.read_until.side_effect = exc_type('Simulated disconnect')
-    cclient._serial = mock_serial
+    real_serial = cclient._serial
+    mock_serial_tmp = MagicMock()
+    type(mock_serial_tmp).in_waiting = property(lambda self: 1)
+    mock_serial_tmp.read_until.side_effect = exc_type('Simulated disconnect')
+    cclient._serial = mock_serial_tmp
     
     with patch.object(cclient, '_handle_serial_lost') as mock_handle_lost:
         for _ in range(20):
@@ -532,3 +571,5 @@ def test_listen_exceptions(simulator, cclient: AtClient, exc_type):
                 break
             time.sleep(0.05)
         assert mock_handle_lost.called
+    
+    cclient._serial = real_serial

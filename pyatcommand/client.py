@@ -752,7 +752,7 @@ class AtClient:
             if self.crc_enable:
                 pname = self.crc_enable.split('=')[0].replace('AT', '')
                 abbr['crc'] = f'{pname}='
-            self._toggle_raw(False)
+            self._toggle_rx_raw(False)
             if prop_name in abbr:
                 _log.warning('Detected %s%d - updating config',
                             abbr[prop_name], int(detected))
@@ -760,6 +760,16 @@ class AtClient:
             else:
                 _log.warning('Unknown property %s', prop_name)
 
+    def _handle_intermediate_callback(self, buffer: bytearray):
+        """Calls back to the specified function after an intermediate result."""
+        if self._mid_cb_kwargs.get('buffer') is True:
+            if not isinstance(buffer, (bytearray, bytes)):
+                raise ValueError('Invalid buffer')
+            errors = self._mid_cb_kwargs.get('errors', 'ignore')
+            self._mid_cb_kwargs['buffer'] = buffer.decode(errors=errors)
+        self._mid_cb(*self._mid_cb_args, **self._mid_cb_kwargs)
+        self._reset_mid_cb()
+    
     def _listen(self):
         """Background thread to listen for responses/unsolicited."""
         buf = self._rx_buf
@@ -794,8 +804,9 @@ class AtClient:
             try:
                 buffer.decode()
             except UnicodeDecodeError:
-                _log.warning('Removed %d invalid characters in buffer',
-                             buffer.decode(errors='replace').count('\uFFFD'))
+                remove = buffer.decode(errors='replace').count('\uFFFD')
+                _wrap_log(f'Removing {remove} invalid characters in buffer',
+                          buffer, logging.WARNING)
                 buffer[:] = buffer.decode(errors='ignore').encode()
             while i < len(buffer):
                 char = buffer[i:i+1]
@@ -820,15 +831,15 @@ class AtClient:
                     if not line.startswith(cr+lf):
                         lines[i] = cr+lf + line
                         if warnings:
-                            _log.warning('Fixed missing V1 result header on %s',
-                                         dprint(line.decode(errors='replace')))
+                            _wrap_log('Fixed missing V1 result header on',
+                                      line, logging.WARNING)
                 elif line.endswith((b'0'+cr, b'4'+cr)) and len(line) > 2:
                     if not self._cmd_pending or not _has_echo(line):
                         lines[i] = line[:-2] + cr+lf
                         lines.insert(i+1, line[-2:])
                         if warnings:
-                            _log.warning('Fixed missing V0 info trailer on %s',
-                                         dprint(line.decode(errors='replace')))
+                            _wrap_log('Fixed missing V0 info trailer on',
+                                      line, logging.WARNING)
                 i += 1
             return lines
         
@@ -868,9 +879,9 @@ class AtClient:
                         if _has_echo(line):
                             continue
                         if line.startswith(prompt) or line.endswith(prompt):
-                            _log.debug('Found intermediate result %s in %s',
-                                       dprint(self._mid_prompt),
-                                       dprint(line.decode(errors='ignore')))
+                            dbg = ('Found intermediate result'
+                                   f' {dprint(self._mid_prompt)}')
+                            _wrap_log(dbg, line)
                             self._mid_prompt = None
                             return True
             return False
@@ -906,17 +917,14 @@ class AtClient:
                 idx = buf.find(cmd)
                 if idx > 0:
                     pre_echo = buffer[:idx]
-                    _log.warning('Found pre-echo data: %s',
-                                 dprint(pre_echo.decode(errors="replace")))
+                    _wrap_log('Found pre-echo data', pre_echo, logging.WARNING)
                     residual = _process_urcs(pre_echo)
                     if residual:
-                        _log.warning('Dumped residual data: %s',
-                                     dprint(residual.decode(errors="replace")))
+                        _wrap_log('Dumped residual data', residual, logging.WARNING)
                     del buffer[:idx]
                 del buffer[:len(cmd)]
                 if vlog(VLOG_TAG):
-                    _log.debug('Removed echo: %s',
-                               dprint(cmd.decode(errors='replace')))
+                    _wrap_log('Removed echo', cmd)
         
         def _handle_echo(buffer: bytearray):
             """Check for and remove a command echo."""
@@ -942,15 +950,13 @@ class AtClient:
                 try:
                     urc = line.decode()
                 except UnicodeDecodeError:
-                    _log.warning('Invalid characters in URC: %s',
-                                 dprint(line.decode(errors='backslashreplace')))
+                    _wrap_log('Invalid characters in URC', line, logging.WARNING)
                     urc = line.decode(errors='ignore')
                 self._unsolicited_queue.put(urc)
                 if _is_response(line, self.verbose):
-                    _log.warning('Suspected orphan response: %s',
-                                 dprint(line.decode(errors='backslashreplace')))
+                    _wrap_log('Suspected orphan response', line, logging.WARNING)
                 elif vlog(VLOG_TAG):
-                    _log.debug('Processed URC: %s', dprint(urc))
+                    _wrap_log('Processed URC', line)
                 del buffer[:len(line)]
             return buffer   # residual data after parsing
             
@@ -963,7 +969,6 @@ class AtClient:
             Returns:
                 True if there is no remaining serial data else False
             """
-            self._toggle_raw(False)
             lines = _at_splitlines(buffer, warnings=vlog(VLOG_TAG))
             response_lines = []
             i = 0
@@ -975,8 +980,8 @@ class AtClient:
                     if _is_crc(combined) and self.crc:
                         if not validate_crc(combined.decode(errors='ignore'),
                                             self.crc_sep):
-                            _log.warning('Invalid CRC in response: %s',
-                                         dprint(combined.decode(errors='replace')))
+                            _wrap_log('Invalid CRC in response',
+                                      combined, logging.WARNING)
                         found_response = True
                     elif _is_response(combined, self.verbose) and not self.crc:
                         found_response = True
@@ -987,8 +992,8 @@ class AtClient:
                 try:
                     response = bytearray().join(response_lines).decode()
                 except UnicodeDecodeError:
-                    _log.warning('Invalid characters found in response: %s',
-                                 dprint(buf.decode(errors='backslashreplace')))
+                    _wrap_log('Invalid characters found in response',
+                              buf, logging.WARNING)
                     response = combined.decode(errors='ignore')
                 self._response_queue.put(response)
                 if vlog(VLOG_TAG):
@@ -1001,33 +1006,49 @@ class AtClient:
             if buffer:
                 residual = _process_urcs(buffer)
                 if residual:
-                    errors = 'backslashreplace'
-                    _log.warning('Residual buffer data: %s',
-                                 dprint(residual.decode(errors=errors)))
+                    _wrap_log('Residual buffer data', residual, logging.WARNING)
             if self._serial.in_waiting > 0:
-                _log.debug('More RX data to process')
+                _wrap_log('More RX data to process')
                 return False
             else:
                 self._rx_ready.set()
                 if vlog(VLOG_TAG):
-                    _log.debug('RX ready')
+                    _wrap_log('RX ready')
                 return True
         
+        def _wrap_log(msg: str = '',
+                      buffer: Optional[Union[bytearray, bytes]] = None,
+                      level: int = logging.DEBUG,
+                      **kwargs) -> None:
+            if not isinstance(msg, str):
+                raise ValueError('Invalid debug message')
+            if buffer is not None and not isinstance(buffer, (bytearray, bytes)):
+                raise ValueError('Invalid buffer')
+            errors = kwargs.get('errors', 'backslashreplace')
+            if self._debug_raw() and self._is_debugging_raw:
+                self._toggle_rx_raw(False)
+            if buffer is not None:
+                msg += (': ' if not msg.endswith((':', ': ')) else '')
+                msg += dprint(buffer.decode(errors=errors))
+            _log.log(level, '%s', msg)
+            
         while self._rx_running:
             try:
                 while self._serial.in_waiting > 0 or peeked:
                     if self._data_mode:
-                        break
+                        break   # allow data mode to receive/parse
                     if self._rx_ready.is_set():
                         self._rx_ready.clear()
                         if vlog(VLOG_TAG):
                             _log.debug('RX busy')
-                    if not self._is_debugging_raw:
-                        self._toggle_raw(True)
                     read_until = cr
                     if self.verbose:
                         read_until += lf
                     chunk = peeked or self._serial.read_until(read_until)
+                    if not peeked and self._debug_raw():
+                        if not self._is_debugging_raw:
+                            self._toggle_rx_raw(True)
+                        print(dprint(chunk.decode(errors='replace')), end='')
                     peeked = None
                     if not chunk:
                         continue
@@ -1038,13 +1059,10 @@ class AtClient:
                     
                     if last_char == lf:
                         if vlog(VLOG_TAG + 'dev'):
-                            self._toggle_raw(False)
-                            _log.debug('Assessing LF: %s',
-                                       dprint(buf.decode(errors='replace')))
+                            _wrap_log('Assessing LF', buf)
                         if _is_response(buf, verbose=True):
                             if vlog(VLOG_TAG):
-                                _log.debug('Found V1 response: %s',
-                                           dprint(buf.decode(errors='replace')))
+                                _wrap_log('Found V1 response', buf)
                             self._update_config('verbose', True)
                             _handle_echo(buf)
                             if _is_crc_enable_cmd(buf):
@@ -1052,7 +1070,7 @@ class AtClient:
                             if self.crc:
                                 if not _is_crc_disable_cmd(buf):
                                     if vlog(VLOG_TAG + 'dev'):
-                                        _log.debug('Continue reading for CRC')
+                                        _wrap_log('Continue reading for CRC')
                                     continue   # keep processing for CRC
                                 self._update_config('crc', False)
                             else:   # check if CRC is configured but unknown
@@ -1064,7 +1082,8 @@ class AtClient:
                         elif _is_crc(buf):
                             self._update_config('crc', True)
                             if _has_echo(buf):
-                                _log.warning('Echo should already be removed')
+                                _wrap_log('Echo should already be removed',
+                                          level=logging.WARNING)
                                 _handle_echo(buf)
                             _complete_parsing(buf)
                         elif not self._cmd_pending:
@@ -1073,15 +1092,12 @@ class AtClient:
                     
                     elif last_char == cr:
                         if vlog(VLOG_TAG + 'dev'):
-                            self._toggle_raw(False)
-                            _log.debug('Assessing CR: %s',
-                                       dprint(buf.decode(errors='replace')))
+                            _wrap_log('Assessing CR', buf)
                         if _is_response(buf, verbose=False): # check for V0
                             peeked = self._serial.read(1)
                             if peeked != lf:   # V0 confirmed
                                 if vlog(VLOG_TAG):
-                                    _log.debug('Found V0 response: %s',
-                                               dprint(buf.decode(errors='replace')))
+                                    _wrap_log('Found V0 response', buf)
                                 self._update_config('verbose', False)
                                 _handle_echo(buf)
                                 if peeked == crc_sep:
@@ -1090,36 +1106,30 @@ class AtClient:
                                     _complete_parsing(buf)
                         assert buf is not None
                     
-                    elif (isinstance(self._mid_prompt, str) and
-                          _is_intermediate_result(buf)):
-                        if vlog(VLOG_TAG + 'dev'):
-                            self._toggle_raw(False)
-                            _log.debug('Checking for intermediate prompt: %s',
-                                       dprint(buf.decode(errors='replace')))
+                    if _is_intermediate_result(buf):
                         if self._serial.in_waiting:
-                            _log.debug('Processing intermediate data')
+                            _wrap_log('Processing more intermediate data')
                             buf.extend(self._serial.read_all())
                         if callable(self._mid_cb):
-                            _log.debug('Triggering intermediate callback %s',
-                                        self._mid_cb.__name__)
-                            self._mid_cb(*self._mid_cb_args,
-                                            **self._mid_cb_kwargs)
-                            self._reset_mid_cb()
+                            _wrap_log('Triggering intermediate callback'
+                                      f' {self._mid_cb.__name__}')
+                            self._handle_intermediate_callback(buf)
                             
+                time.sleep(self._wait_no_rx_data)   # Prevent CPU overuse
+                if not self._rx_ready.is_set():
+                    if vlog(VLOG_TAG):
+                        _wrap_log('Set RX ready after no data'
+                                  f' for {self._wait_no_rx_data:0.2f}s')
+                    self._rx_ready.set()
+        
             except (serial.SerialException, OSError) as exc:
+                self._toggle_rx_raw(False)
                 buf.clear()
                 if self._cmd_pending:
                     self._response_queue.put(None)   # trigger send_command handling
                 conn_exc = ConnectionError(*exc.args)
                 self._handle_serial_lost(conn_exc)
             
-            time.sleep(self._wait_no_rx_data)   # Prevent CPU overuse
-            if not self._rx_ready.is_set():
-                if vlog(VLOG_TAG):
-                    _log.warning('Set RX ready after no data for %0.2fs',
-                                 self._wait_no_rx_data)
-                self._rx_ready.set()
-        
         _log.debug('Lister exited')
 
     def _handle_serial_lost(self, exc: Optional[Exception] = None):
@@ -1142,14 +1152,16 @@ class AtClient:
         return (os.getenv('AT_RAW') and
                 os.getenv('AT_RAW').lower() in ['1', 'true'])
     
-    def _toggle_raw(self, raw: bool) -> None:
+    def _toggle_rx_raw(self, raw: bool) -> None:
         """Toggles delimiters for streaming of received characters to stdout"""
         if self._debug_raw():
             if raw:
                 if not self._is_debugging_raw:
+                    _log.debug('Toggling raw ON')
                     print(f'{AT_RAW_RX_TAG}', end='')
                 self._is_debugging_raw = True
             else:
                 if self._is_debugging_raw:
                     print()
+                    _log.debug('Toggled raw OFF')
                 self._is_debugging_raw = False
