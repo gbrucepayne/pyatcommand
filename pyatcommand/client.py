@@ -334,7 +334,7 @@ class AtClient:
             self._rx_ready.set()
             self._listener_thread.start()
         except serial.SerialException as exc:
-            raise ConnectionError(f'Unable to open {self._port}: {exc}') from exc
+            raise self._connection_error(exc) from exc
         attempts = 0
         start_time = time.time()
         while not self.is_connected():
@@ -1127,8 +1127,7 @@ class AtClient:
                 buf.clear()
                 if self._cmd_pending:
                     self._response_queue.put(None)   # trigger send_command handling
-                conn_exc = ConnectionError(*exc.args)
-                self._handle_serial_lost(conn_exc)
+                self._handle_serial_lost(self._connection_error(exc))
             
         _log.debug('Lister exited')
 
@@ -1144,6 +1143,14 @@ class AtClient:
             self.disconnect()
         except Exception as inner_exc:
             _log.warning('Error disconnecting: %s', inner_exc)
+    
+    def _connection_error(self, exc: Exception) -> ConnectionError:
+        if len(exc.args) > 1:
+            errno, verbose, *rest = exc.args
+            args = (errno, str(verbose).split(']')[-1].strip(), *rest)
+        else:
+            args = exc.args
+        return ConnectionError(*args)
     
     #--- Raw debug mode for detailed interface analysis ---#
     
