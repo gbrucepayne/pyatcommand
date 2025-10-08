@@ -772,6 +772,8 @@ class AtClient:
     
     def _listen(self):
         """Background thread to listen for responses/unsolicited."""
+        if vlog(VLOG_TAG):
+            _log.debug('AT listener started')
         buf = self._rx_buf
         peeked = None
         # use encoded values for bytes/bytearray
@@ -955,8 +957,10 @@ class AtClient:
                 self._unsolicited_queue.put(urc)
                 if _is_response(line, self.verbose):
                     _wrap_log('Suspected orphan response', line, logging.WARNING)
-                elif vlog(VLOG_TAG):
-                    _wrap_log('Processed URC', line)
+                elif not(line.startswith(cr+lf) and line.endswith(cr+lf)):
+                    _wrap_log('Non-compliant URC', line)
+                else:
+                    _wrap_log('Received URC', line)
                 del buffer[:len(line)]
             return buffer   # residual data after parsing
             
@@ -1006,7 +1010,7 @@ class AtClient:
             if buffer:
                 residual = _process_urcs(buffer)
                 if residual:
-                    _wrap_log('Residual buffer data', residual, logging.WARNING)
+                    _wrap_log('Residual buffer data', residual)
             if self._serial.in_waiting > 0:
                 _wrap_log('More RX data to process')
                 return False
@@ -1129,7 +1133,8 @@ class AtClient:
                     self._response_queue.put(None)   # trigger send_command handling
                 self._handle_serial_lost(self._connection_error(exc))
             
-        _log.debug('Lister exited')
+        if vlog(VLOG_TAG):
+            _log.debug('AT listener exited')
 
     def _handle_serial_lost(self, exc: Optional[Exception] = None):
         """Handle a serial connection loss."""
