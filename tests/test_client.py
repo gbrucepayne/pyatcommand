@@ -573,3 +573,23 @@ def test_listen_exceptions(simulator, cclient: AtClient, exc_type):
         assert mock_handle_lost.called
     
     cclient._serial = real_serial
+
+
+def test_noncompliant_urc_like_response(simulator, cclient: AtClient, log_verbose):
+    """Example Quectel BG95 sending data responds with SEND OK or SEND FAIL.
+    This appears to be blocking as well.
+    """
+    complete = False
+    start_time = time.monotonic()
+    with pytest.raises(AtTimeout):
+        cclient.send_command('AT+QISENDEX=1,"6563686f"', timeout=0.5)
+    while not complete and time.monotonic() - start_time < 10:
+        urc = cclient.get_urc()
+        if urc:
+            if 'OK' in urc:
+                complete = True
+            else:
+                logger.info('Unhandled URC: %s', urc)
+        if not complete:
+            time.sleep(0.1)
+    assert complete

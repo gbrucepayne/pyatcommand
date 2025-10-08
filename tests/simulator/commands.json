@@ -33,5 +33,6 @@
     "AT+XMODEMSEND=": {"xmodem": true, "dataModeEntry": true, "dataModeExitSequence": "<auto>", "dataModeExitResponse": "\r\nOK\r\n"},
     "AT+XMODEMRECV=": {"xmodem": true, "intermediateResponse": "\r\n+XMODEMRECV:", "dataModeEntry": true, "dataReply": "Test receiving XMODEM data", "dataModeExitSequence": "<auto>", "dataModeExitResponse": "\r\nOK\r\n"},
     "AT!V0LIKE?": {"response": "\r\n!V0LIKE: 0\r\n\r\nOK\r\n"},
-    "AT%REGINFO": {"response": "\r\n%REGINFO: 2,1,0,1,16,116,15,1,128,2025-08-10 02:08:22,604781,0,0,0\r\n\r\nOK\r\n"}
+    "AT%REGINFO": {"response": "\r\n%REGINFO: 2,1,0,1,16,116,15,1,128,2025-08-10 02:08:22,604781,0,0,0\r\n\r\nOK\r\n"},
+    "AT+QISENDEX=1,\"6563686f\"": {"response": "AT+QISENDEX=1,\"6563686f\"\r\r\nSEND OK\r\n", "delay": 2, "hasEcho": true}
 }
